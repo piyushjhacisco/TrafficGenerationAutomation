@@ -1,0 +1,43 @@
+[
+    {
+        "type": "windows",
+        "aws_region": "us-west-2",
+        "ami_id": "ami-005148a6a3abb558a",
+        "instance_type": "t3.medium",
+        "key_name": "piyushjha",
+        "key_file": "/Users/piyujha/Downloads/piyushjha.pem",
+        "security_group_id": "sg-0ff9708d1c27e8c79",
+        "vpc_id": "vpc-b7a1a0ce",
+        "subnet_id": "subnet-6706621e",
+        "instance_name": "windows-test-instance",
+        "pac_file":"https://proxy-pac-01.int.pac.sse.cisco.com/8257939hd501036fabe21e09847ea2cc/proxy.pac",
+        "proxy_url": "swg-proxy_us-west-2_2_0n.stage.sigproxy.aws.umbrella.com"
+    },
+    {
+        "type": "linux",
+        "aws_region": "us-west-2",
+        "ami_id": "ami-00c257e12d6828491",
+        "instance_type": "t2.micro",
+        "key_name": "piyushjha",
+        "key_file": "/Users/piyujha/Downloads/piyushjha.pem",
+        "security_group_id": "sg-0ff9708d1c27e8c79",
+        "vpc_id": "vpc-b7a1a0ce",
+        "subnet_id": "subnet-6706621e",
+        "instance_name": "ubuntu-test-instance",
+        "username": "ubuntu"
+    },
+    {
+        "type":"windows-ztna-client",
+        "aws_region": "us-west-2",
+        "ami_id": "ami-0113713dca2476b07",
+        "instance_type": "t3.medium",
+        "key_name": "piyushjha",
+        "key_file": "/Users/piyujha/Downloads/piyushjha.pem",
+        "security_group_id": "sg-0ff9708d1c27e8c79",
+        "vpc_id": "vpc-b7a1a0ce",
+        "subnet_id": "subnet-6706621e",
+        "instance_name": "windows-test-instance",
+        "proxy_url": "swg-proxy_us-west-2_2_0n.stage.sigproxy.aws.umbrella.com"
+    }
+
+]
