@@ -12,31 +12,6 @@ The project integrates AWS EC2 instance management, file transfers, and task-spe
 
 ---
 
-## **Project Structure**
-The project is divided into modular components for each task:
-.
-├── main.py                  # Entry point for managing EC2 instances and executing tasks
-├── utils.py                 # Shared utility functions \(e.g., file operations, AWS helpers\)
-├── Config.json              # Configuration for instance types and tasks
-├── Instance.json            # Tracks created/reused instance details
-├── DNS/
-│   └── Tasks.py             # Centralized DNS task logic
-├── Firewall/
-│   └── Tasks.py             # Centralized Firewall task logic
-├── Web/
-│   └── Tasks.py             # Centralized Web task logic
-├── ZTNAClientless/
-│   └── Tasks.py             # Centralized ZTNA-Clientless task logic
-├── ZTNAClientbased/
-│   └── Tasks.py             # Centralized ZTNA-Clientbased task logic
-├── files/
-│   ├── zta-staging.txt      # Hosts file for ZTNA-Clientbased tasks
-│   ├── secure_access_signing_nonprod.p7b # Certificate for ZTNA-Clientbased tasks
-│   ├── ztaEnroll_saml_commercial_int_stage.json # Enrollment file for ZTNA-Clientbased tasks
-└── README.md                # Documentation
-
----
-
 ## **Task-Specific Workflows**:
 
 #### **DNS Tasks**
@@ -158,4 +133,28 @@ Before running the project, ensure the following tools, libraries, and configura
    - Ensure you have the correct `.pem` file for your AWS key pair.
 
 ---
+## **Project Structure**
+The project is divided into modular components for each task:
 
+```plaintext
+.
+├── main.py                  # Entry point for managing EC2 instances and executing tasks
+├── utils.py                 # Shared utility functions \(e.g., file operations, AWS helpers\)
+├── Config.json              # Configuration for instance types and tasks
+├── Instance.json            # Tracks created/reused instance details
+├── DNS/
+│   └── Tasks.py             # Centralized DNS task logic
+├── Firewall/
+│   └── Tasks.py             # Centralized Firewall task logic
+├── Web/
+│   └── Tasks.py             # Centralized Web task logic
+├── ZTNAClientless/
+│   └── Tasks.py             # Centralized ZTNA-Clientless task logic
+├── ZTNAClientbased/
+│   └── Tasks.py             # Centralized ZTNA-Clientbased task logic
+├── files/
+│   ├── zta-staging.txt      # Hosts file for ZTNA-Clientbased tasks
+│   ├── secure_access_signing_nonprod.p7b # Certificate for ZTNA-Clientbased tasks
+│   ├── ztaEnroll_saml_commercial_int_stage.json # Enrollment file for ZTNA-Clientbased tasks
+└── README.md                # Documentation
+---
