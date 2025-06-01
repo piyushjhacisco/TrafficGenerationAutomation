@@ -14,8 +14,6 @@ The project integrates AWS EC2 instance management, file transfers, and task-spe
 
 ## **Project Structure**
 The project is divided into modular components for each task:
-
-```plaintext
 .
 ├── main.py                  # Entry point for managing EC2 instances and executing tasks
 ├── utils.py                 # Shared utility functions \(e.g., file operations, AWS helpers\)
