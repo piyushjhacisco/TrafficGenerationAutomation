@@ -12,6 +12,44 @@ The project integrates AWS EC2 instance management, file transfers, and task-spe
 
 ---
 
+## **How to Use This System**
+
+To use the **Events Generation System**, follow these step-by-step instructions:
+
+### 1.1. **AWS Session Generation (Using `sl` Command)**:
+   - Before running the script, ensure you have generated an AWS session.
+   - Use the following command to generate the session:
+     ```bash
+     sl aws session generate --role-name engineer --account-id 07XXXXXXXX --profile default
+     ```
+   - Replace `07XXXXXXXX` with your **AWS account ID**.
+   - This command will generate a temporary AWS session for the specified account.
+
+### 1.2. **Configure AWS CLI**:
+   - Install and configure AWS CLI with access to your AWS account:
+     ```bash
+     aws configure
+     ```
+   - Provide your AWS access key, secret key, region, and output format as requested.
+
+### 1.3. **Prepare AWS EC2 Key Pair**:
+   - Ensure you have the correct `.pem` file for your AWS key pair.
+   - This key file will be required to authenticate with your EC2 instances.
+   - The key pair details should be added to the `Config.json` file.
+
+### 1.4. **Set Up the `Config.json` File**:
+   - Update the `Config.json` file with the required configuration for each instance type.
+   - The following fields must be provided for every instance configuration:
+     - **`key_name`**: The name of the AWS EC2 key pair to use.
+     - **`key_file`**: The path to your `.pem` file for the key pair.
+     - **`security_group_id`**: The ID of the security group for the instance.
+     - **`vpc_id`**: The ID of the VPC where the instance resides.
+     - **`subnet_id`**: The ID of the subnet where the instance will be launched.
+     - **`pac_file`**: (For web tasks) URL to the PAC file for proxy configuration.
+     - **`proxy_url`**: (For web tasks) Proxy URL for system and browser settings.
+
+---
+
 ## **Task-Specific Workflows**:
 
 #### **DNS Tasks**
@@ -107,16 +145,7 @@ The project integrates AWS EC2 instance management, file transfers, and task-spe
 Before running the project, ensure the following tools, libraries, and configurations are set up.
 
 ### **Tools**
-1. **AWS Session Generation (Using `sl` Command)**:
-   - Before running the script, ensure you have generated an AWS session.
-   - Use the following command to generate the session:
-     ```bash
-     sl aws session generate --role-name engineer --account-id 07XXXXXXXX --profile default
-     ```
-   - Replace `07XXXXXXXX` with your **AWS account ID**.
-   - This command will generate a temporary AWS session for the specified account.
-
-2. **AWS CLI**:
+1. **AWS CLI**:
    - Install and configure AWS CLI with access to your AWS account:
      ```bash
      aws configure
@@ -128,9 +157,6 @@ Before running the project, ensure the following tools, libraries, and configura
      ```bash
      pip install boto3 paramiko winrm cryptography
      ```
-
-4. **AWS EC2 Key Pair**:
-   - Ensure you have the correct `.pem` file for your AWS key pair.
 
 ---
 ## **Project Structure**
