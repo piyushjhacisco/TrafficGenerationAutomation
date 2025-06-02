@@ -1,4 +1,5 @@
 import logging
+import time
 from utils import (
     load_config,
     save_instance_details,
@@ -100,12 +101,14 @@ def handle_instance_reuse_or_creation(config, task_name, instance_file):
 
         if existing_instance:
             logging.info(f"Using existing instance {instance_id} for {task_name} from Instance.json.")
+            ask_user_to_disable_firewall_and_enable_winrm(existing_instance["PublicIpAddress"])
             return existing_instance
         else:
             logging.info(f"Instance {instance_id} not found in Instance.json. Fetching details from AWS...")
             instance_details = get_instance_details_from_aws(instance_id, config["aws_region"], config.get("key_file"))
             if instance_details:
                 update_instance_in_json(instance_id, instance_details, instance_file)
+                ask_user_to_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
                 return instance_details
             else:
                 logging.error(f"Failed to fetch details for instance {instance_id}. Exiting.")
@@ -126,12 +129,15 @@ def handle_instance_reuse_or_creation(config, task_name, instance_file):
                 password = get_windows_password(ec2, instance_id, config["key_file"])
                 instance_details["Password"] = password
                 instance_details["Username"] = "Administrator"
+                # Update the instance.json file
+                update_instance_in_json(instance_id, instance_details, instance_file)
                 ask_user_to_disable_firewall_and_enable_winrm(public_ip)
             else:
                 instance_details["Username"] = config.get("username", "ubuntu")
+                update_instance_in_json(instance_id, instance_details, instance_file)
+                print("waiting for 4 mins for initialization")
+                time.sleep(240)  # Wait for 4 minutes for initialization
 
-            # Update the instance.json file
-            update_instance_in_json(instance_id, instance_details, instance_file)
             return instance_details
         else:
             logging.error(f"Failed to create instance for {task_name}. Exiting.")
