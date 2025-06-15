@@ -4,24 +4,13 @@ from src.utils import (
     load_instance_file,
     save_instance_file,
     create_instance,
-    get_windows_password,
     disable_source_destination_check,
     INSTANCE_JSON_FILE,
-    check_internet_connectivity as fw_check_internet_connectivity,
     get_instance_details_from_aws,
     show_disable_firewall_and_enable_winrm,
-    handle_instance_reuse_or_creation
 )
 import boto3
-from src.Firewall.Tasks import (
-    ssh_and_configure_ipsec,
-    add_routes_and_maybe_change_gateway,
-    winrm,
-    delete_specific_default_route,
-    change_default_gateway_winrm,
-    detect_default_gateways_winrm,
-    delete_default_gateway_winrm
-)
+import winrm
 
 def update_instance_in_json(instance_id, updated_details, instance_file):
     instances = load_instance_file()
@@ -66,7 +55,6 @@ def execute_firewall_workflow():
             instance = next((i for i in instances if i["InstanceId"] == instance_id), None)
             if instance:
                 st.success("Instance found in Instance.json.")
-                st.json(instance)
                 win_instance = instance
             else:
                 st.info("Instance not found in Instance.json. Will fetch from AWS if you click below.")
@@ -75,7 +63,6 @@ def execute_firewall_workflow():
                     if details:
                         update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                         st.success("Fetched and saved instance details from AWS.")
-                        st.json(details)
                         win_instance = details
                     else:
                         st.error("Failed to fetch instance details from AWS.")
@@ -100,7 +87,6 @@ def execute_firewall_workflow():
                     details["Username"] = "Administrator"
                 update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                 st.success("New instance created and saved.")
-                st.json(details)
                 win_instance = details
             else:
                 st.error("Failed to create new instance.")
@@ -170,7 +156,6 @@ def execute_firewall_workflow():
             instance = next((i for i in instances if i["InstanceId"] == linux_instance_id), None)
             if instance:
                 st.success("Instance found in Instance.json.")
-                st.json(instance)
                 linux_instance = instance
             else:
                 st.info("Instance not found in Instance.json. Will fetch from AWS if you click below.")
@@ -179,7 +164,6 @@ def execute_firewall_workflow():
                     if details:
                         update_instance_in_json(linux_instance_id, details, INSTANCE_JSON_FILE)
                         st.success("Fetched and saved Linux instance details from AWS.")
-                        st.json(details)
                         linux_instance = details
                     else:
                         st.error("Failed to fetch instance details from AWS.")
@@ -200,7 +184,6 @@ def execute_firewall_workflow():
                 import time
                 with st.spinner("Waiting for Ubuntu instance to initialize (4 minutes)..."):
                     time.sleep(240)
-                st.json(details)
                 linux_instance = details
             else:
                 st.error("Failed to create Linux instance.")
@@ -300,51 +283,20 @@ def execute_firewall_workflow():
     if not st.session_state.get("fw_ipsec_ok"):
         return
 
-    # --- Windows: Change Default Gateway ---
-    st.subheader("Step 8: Change Default Gateway (Windows)")
-    if st.button("Change Default Gateway on Windows", **disable_if_running()):
-        set_step_running(True)
-        try:
-            logs, old_gw = change_default_gateway_winrm(win_instance, linux_instance)
-            st.text_area("Change Default Gateway Logs", "\n".join(logs), height=200)
-            st.session_state["fw_old_default_gateway"] = old_gw
-            st.success("Default gateway changed on Windows (see logs above for details)")
-        except Exception as e:
-            st.error(f"Error changing default gateway: {e}")
-            import traceback
-            st.text_area("Change Default Gateway Logs", traceback.format_exc(), height=200)
-            if st.button("Retry Change Default Gateway", **disable_if_running()):
-                set_step_running(False)
-                st.experimental_rerun()
-            set_step_running(False)
-            return
-        set_step_running(False)
-    # --- Windows: Delete Specific Default Route (Optional) ---
-    st.subheader("Step 9: Delete Specific Default Route (Windows, Optional)")
-    if st.button("Detect Current Default Gateway(s) for Deletion", **disable_if_running()):
-        set_step_running(True)
-        try:
-            detected_gws = detect_default_gateways_winrm(win_instance)
-            if detected_gws:
-                st.session_state["fw_old_default_gateway_list"] = detected_gws
-                st.success(f"Detected default gateways: {', '.join(detected_gws)}")
-            else:
-                st.warning("No default gateways detected.")
-        except Exception as e:
-            st.error(f"Error detecting default gateways: {e}")
-        set_step_running(False)
-    old_default_gateway_list = st.session_state.get("fw_old_default_gateway_list", [])
-    if old_default_gateway_list:
-        st.info(f"Detected default gateways: {', '.join(old_default_gateway_list)}")
-        for gw in old_default_gateway_list:
-            if st.button(f"Delete Default Route via {gw}", key=f"delete_gw_{gw}", **disable_if_running()):
-                set_step_running(True)
-                try:
-                    logs = delete_default_gateway_winrm(win_instance, gw)
-                    st.text_area(f"Delete Default Route Logs ({gw})", "\n".join(logs), height=120)
-                    st.success(f"Default route with NextHop {gw} deleted on Windows successfully!")
-                except Exception as e:
-                    st.error(f"Error deleting default route via {gw}: {e}")
-                set_step_running(False)
+    # --- Step 8: Change Default Gateway (Windows) ---
+    if 'fw_win_instance' in st.session_state and st.session_state['fw_win_instance']:
+        win_instance = st.session_state['fw_win_instance']
+        st.subheader("Step 8: Change Default Gateway (Windows)")
+        if st.button("Change Default Gateway on Windows"):
+            try:
+                logs, old_gw = change_default_gateway_winrm(win_instance, linux_instance)
+                st.text_area("Change Default Gateway Logs", "\n".join(logs), height=200)
+                st.session_state["fw_old_default_gateway"] = old_gw
+                st.success("Default gateway changed on Windows (see logs above for details)")
+            except Exception as e:
+                st.error(f"Error changing default gateway: {e}")
+                import traceback
+                st.text_area("Change Default Gateway Logs", traceback.format_exc(), height=200)
     else:
-        st.info("No old default gateway detected yet. Please run the detection step above first.")
+        st.warning("Please select or create a Windows instance and set st.session_state['fw_win_instance'] before testing this step.")
+

@@ -1,18 +1,16 @@
 import paramiko
 import json
 import os
-import shlex
 import logging
 import time
 import textwrap
 import winrm
 import subprocess
-from src.utils import retry_command, install_with_retries, ssh_connect_with_retry
+import tkinter as tk
+from tkinter import messagebox
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-
 
 #---------------------------------------------------------UBUNTU TASKS-----------------------------------------------------------------
 def execute_with_fallback(ssh, command, retries=3, delay=10, username=None, hostname=None, key_file=None):
@@ -307,11 +305,6 @@ def prompt_user_for_recovery(failed_steps):
         except ValueError:
             logging.error("Invalid input. Please enter a number.")
 
-import tkinter as tk
-from tkinter import messagebox
-import json
-import logging
-
 def ask_for_ipsec_details():
     """Open a modal dialog to ask the user for IPsec details and return them."""
     # Load the Windows private IP from Instance.json
@@ -408,7 +401,6 @@ def ssh_and_configure_ipsec(public_ip, username, key_file, ipsec_details):
     and restart the service. Handles retry mechanism and calls task-specific functions.
     Returns a summary log and raises on failure.
     """
-    import logging
     logs = []
     failed_steps = []  # Track failed steps for recovery
     try:
@@ -513,244 +505,19 @@ def backup_remote_file(ssh, remote_path):
         logging.warning(f"Could not create backup for {remote_path}: {e}")
 
 
-#---------------------------------------------------------WINDOWS TASKS-----------------------------------------------------------------
-
-def delete_specific_default_route(host, username, password, route_to_delete):
-    """
-    Deletes a specific default route (0.0.0.0/0) with a specific NextHop (e.g., 172.31.16.1).
-    """
-    if not route_to_delete:
-        logging.error("NextHop for route to delete is missing. Cannot proceed.")
-        return
-
-    try:
-        logging.info(f"Deleting default route with NextHop {route_to_delete} on Windows instance at {host}...")
-
-        # Create a WinRM session
-        session = winrm.Session(f'http://{host}:5985/wsman', auth=(username, password), transport='basic', server_cert_validation='ignore')
-
-        # PowerShell script to delete the specific default route
-        powershell_script = f"""
-        # Define the NextHop of the route to delete
-        $routeToDelete = "{route_to_delete}"
-
-        # Get all default routes (0.0.0.0/0)
-        $defaultRoutes = Get-NetRoute | Where-Object {{ $_.DestinationPrefix -eq "0.0.0.0/0" }}
-
-        # Log all default routes
-        Write-Host "Current Default Routes:"
-        $defaultRoutes | ForEach-Object {{ Write-Host "NextHop: $($_.NextHop), InterfaceIndex: $($_.InterfaceIndex)" }}
-
-        # Find the route to delete based on NextHop
-        $route = $defaultRoutes | Where-Object {{ $_.NextHop -eq $routeToDelete }}
-
-        if ($route) {{
-            Write-Host "Deleting default route with NextHop: $routeToDelete and InterfaceIndex: $($route.InterfaceIndex)..."
-
-            # Delete the route using Remove-NetRoute
-            try {{
-                Remove-NetRoute -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -DestinationPrefix "0.0.0.0/0" -Confirm:$false
-                Write-Host "Route deleted successfully."
-            }} catch {{
-                Write-Host "Failed to delete route. Error: $_"
-            }}
-        }} else {{
-            Write-Host "No matching default route found for NextHop: $routeToDelete."
-        }}
-
-        # Log remaining default routes
-        Write-Host "Remaining Default Routes:"
-        Get-NetRoute | Where-Object {{ $_.DestinationPrefix -eq "0.0.0.0/0" }} | ForEach-Object {{ Write-Host "NextHop: $($_.NextHop), InterfaceIndex: $($_.InterfaceIndex)" }}
-        """
-
-        # Execute the PowerShell script
-        result = session.run_ps(powershell_script)
-
-        # Log the output
-        logging.info(result.std_out.decode())
-        if result.std_err:
-            logging.warning(f"Error: {result.std_err.decode()}")
-
-        logging.info(f"Default route with NextHop {route_to_delete} deleted successfully.")
-    except winrm.exceptions.InvalidCredentialsError:
-        logging.error("Invalid credentials. Please verify the username and password.")
-    except winrm.exceptions.WinRMTransportError:
-        logging.error("WinRM transport error. Ensure WinRM is enabled and configured on the instance.")
-    except Exception as e:
-        logging.error(f"An error occurred while deleting the default route: {e}")
-
-
-def add_routes_and_maybe_change_gateway(host, username, password, new_gateway):
-    """
-    Adds persistent routes and changes the default gateway on a Windows instance.
-    Gets the current default gateway and uses it as the next hop for persistent routes.
-    Always changes the default gateway (no user prompt).
-    """
-    if not new_gateway:
-        logging.error("New default gateway is missing. Cannot proceed.")
-        return
-
-    try:
-        logging.info(f"Adding persistent routes on Windows instance at {host}...")
-
-        # Create a WinRM session
-        session = winrm.Session(f'http://{host}:5985/wsman', auth=(username, password), transport='basic', server_cert_validation='ignore')
-
-        # Step 1: Get the current default gateway
-        powershell_get_gateway = '''
-        $defaultGw = (Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -First 1).NextHop
-        Write-Host $defaultGw
-        '''
-        result_gw = session.run_ps(powershell_get_gateway)
-        default_gateway = result_gw.std_out.decode().strip().split('\n')[-1].strip()
-        logging.info(f"Current default gateway found: {default_gateway}")
-        if not default_gateway:
-            logging.error("Could not determine the current default gateway.")
-            return
-
-        # Step 2: Add persistent routes using the current default gateway as next hop
-        powershell_script_routes = f'''
-        $route1Dest = "171.68.244.0"
-        $route1Mask = "255.255.255.0"
-        $route2Dest = "72.163.220.0"
-        $route2Mask = "255.255.255.0"
-        $nextHop = "{default_gateway}"
-        $metric = 1
-        Write-Host "Adding persistent route: $route1Dest $route1Mask $nextHop metric $metric"
-        route -p add $route1Dest mask $route1Mask $nextHop metric $metric
-        Write-Host "Adding persistent route: $route2Dest $route2Mask $nextHop metric $metric"
-        route -p add $route2Dest mask $route2Mask $nextHop metric $metric
-        Write-Host "Verifying routes..."
-        route print | findstr $route1Dest
-        route print | findstr $route2Dest
-        '''
-        result_routes = session.run_ps(powershell_script_routes)
-        logging.info(result_routes.std_out.decode())
-        if result_routes.std_err:
-            logging.warning(f"Error: {result_routes.std_err.decode()}")
-        logging.info("Persistent routes added successfully.")
-
-        # Step 3: Change the default gateway (always do it, no prompt)
-        powershell_script_gateway = f'''
-        $newGateway = "{new_gateway}"
-        $adapter = Get-NetAdapter | Where-Object {{ $_.Status -eq "Up" }}
-        $interfaceIndex = $adapter.ifIndex
-        $currentGateway = (Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -First 1).NextHop
-        Write-Host "Current Default Gateway: $currentGateway"
-        if ($currentGateway) {{
-            Write-Host "Removing existing default gateway: $currentGateway..."
-            Remove-NetRoute -InterfaceIndex $interfaceIndex -NextHop $currentGateway -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-        }}
-        Write-Host "Adding new default gateway: $newGateway..."
-        New-NetRoute -InterfaceIndex $interfaceIndex -DestinationPrefix "0.0.0.0/0" -NextHop $newGateway
-        Write-Host "Testing connectivity with the new default gateway..."
-        Test-Connection -ComputerName "8.8.8.8" -Count 4
-        if ($?) {{
-            Write-Host "Connectivity test successful. Default gateway updated to: $newGateway"
-        }} else {{
-            Write-Host "Connectivity test failed. The new default gateway may not be reachable."
-        }}
-        '''
-        result_gateway = session.run_ps(powershell_script_gateway)
-        logging.info(result_gateway.std_out.decode())
-        if result_gateway.std_err:
-            logging.warning(f"Error: {result_gateway.std_err.decode()}")
-        logging.info("Default gateway change process completed successfully.")
-
-    except winrm.exceptions.InvalidCredentialsError:
-        logging.error("Invalid credentials. Please verify the username and password.")
-    except winrm.exceptions.WinRMTransportError:
-        logging.error("WinRM transport error. Ensure WinRM is enabled and configured on the instance.")
-    except Exception as e:
-        logging.error(f"An error occurred while adding routes or changing the default gateway: {e}")
-def load_config(file_path, instance_type):
-    """
-    Load configuration from Config.json for the specified instance type (e.g., 'windows' or 'linux').
-    """
-    try:
-        with open(file_path, 'r') as file:
-            configs = json.load(file)
-            # Find the configuration for the specified instance type
-            for config in configs:
-                if config["type"].lower() == instance_type.lower():
-                    return config
-            print(f"Error: Configuration for instance type '{instance_type}' not found.")
-            return None
-    except FileNotFoundError:
-        print(f"Error: Configuration file '{file_path}' not found.")
-        exit(1)
-    except json.JSONDecodeError:
-        print(f"Error: Configuration file '{file_path}' contains invalid JSON.")
-        exit(1)
-# ----------------------------- Centralized Execution -----------------------------
-
-def execute_firewall_tasks(windows_instance_details, ubuntu_instance_details, instance_file):
-    """
-    Centralized function to execute Firewall tasks.
-    :param windows_instance_details: Details of the Windows instance.
-    :param ubuntu_instance_details: Details of the Ubuntu instance.
-    :param instance_file: Path to the Instance.json file.
-    """
-    logging.info("Starting Firewall tasks...")
-
-    ubuntu_config = load_config("Config.json", "linux")
-    print(ubuntu_config)
-
-    # Ubuntu Tasks
-    try:
-        logging.info("Starting Ubuntu tasks...")
-        
-        ipsec_details = ask_for_ipsec_details()
-        print("public ip address of linux",ubuntu_instance_details["PublicIpAddress"],ubuntu_instance_details["Username"],ubuntu_config["key_file"])
-        ssh_and_configure_ipsec(
-            ubuntu_instance_details["PublicIpAddress"],
-            ubuntu_instance_details["Username"],
-            ubuntu_config["key_file"],
-            ipsec_details
-        )
-        logging.info("Ubuntu tasks completed successfully.")
-    except Exception as e:
-        logging.error(f"An error occurred during Ubuntu tasks: {e}")
-        return
-
-    # Windows Tasks
-    try:
-        logging.info("Starting Windows tasks...")
-        password = windows_instance_details["Password"]
-        # Step 1: Add routes and change gateway, get the old default gateway used
-        old_default_gateway = add_routes_and_maybe_change_gateway(
-            windows_instance_details["PublicIpAddress"],
-            windows_instance_details["Username"],
-            password,
-            ubuntu_instance_details["PrivateIpAddress"]
-        )
-        # Step 2: Delete the old default gateway route (if found)
-        if old_default_gateway:
-            delete_specific_default_route(
-                windows_instance_details["PublicIpAddress"],
-                windows_instance_details["Username"],
-                password,
-                old_default_gateway
-            )
-        logging.info("Windows tasks completed successfully.")
-    except Exception as e:
-        logging.error(f"An error occurred during Windows tasks: {e}")
-        return
-
-    logging.info("Firewall tasks completed successfully.")
-
+# --- WINDOWS TASKS ---
 def change_default_gateway_winrm(win_instance, linux_instance):
     """
     Change the default gateway on a Windows instance via WinRM:
     - Detect current default gateway
+    - Add two persistent routes with the old gateway
     - Add new default gateway (Linux private IP)
     - Test connectivity
-    - Remove old default gateway if ping is successful
+    - Remove old default gateway(s) if ping is successful
     Returns logs (list of strings)
     """
     import socket
     logs = []
-    from . import winrm
     session = winrm.Session(
         f'http://{win_instance["PublicIpAddress"]}:5985/wsman',
         auth=(win_instance["Username"], win_instance["Password"]),
@@ -767,6 +534,34 @@ def change_default_gateway_winrm(win_instance, linux_instance):
     result_detect = session.run_ps(detect_gateway_script)
     old_gw = result_detect.std_out.decode().strip()
     logs.append(f"Detected old default gateway: {old_gw}")
+    print(f"Detected old default gateway: {old_gw}")
+
+    # 1. Add two persistent routes with the old gateway
+    add_routes_script = f'''
+    $route1Dest = "171.68.244.0"
+    $route1Mask = "255.255.255.0"
+    $route2Dest = "72.163.220.0"
+    $route2Mask = "255.255.255.0"
+    $nextHop = "{old_gw}"
+    $metric = 1
+    Write-Host "Adding persistent route: $route1Dest $route1Mask $nextHop metric $metric"
+    route -p add $route1Dest mask $route1Mask $nextHop metric $metric
+    Write-Host "Adding persistent route: $route2Dest $route2Mask $nextHop metric $metric"
+    route -p add $route2Dest mask $route2Mask $nextHop metric $metric
+    Write-Host "Verifying routes..."
+    route print | findstr $route1Dest
+    route print | findstr $route2Dest
+    '''
+    result_routes = session.run_ps(add_routes_script)
+    routes_out = result_routes.std_out.decode()
+    routes_err = result_routes.std_err.decode() if result_routes.std_err else ""
+    logs.append(routes_out)
+    print(routes_out)
+    if routes_err:
+        logs.append(f"Error: {routes_err}")
+        print(f"Error: {routes_err}")
+
+    # 2. Add new default gateway (Linux private IP)
     powershell_script_gateway = f'''
     $newGateway = "{linux_instance["PrivateIpAddress"]}"
     $adapter = Get-NetAdapter | Where-Object {{ $_.Status -eq "Up" }}
@@ -778,68 +573,52 @@ def change_default_gateway_winrm(win_instance, linux_instance):
     Write-Host "Testing connectivity with the new default gateway (before deleting old)..."
     $pingResult = Test-Connection -ComputerName "8.8.8.8" -Count 4 -ErrorAction SilentlyContinue
     if ($pingResult) {{
-        Write-Host "Ping successful. Proceeding to remove old default gateway."
-        if ($currentGateway) {{
-            Write-Host "Removing existing default gateway: $currentGateway..."
-            Remove-NetRoute -InterfaceIndex $interfaceIndex -NextHop $currentGateway -DestinationPrefix "0.0.0.0/0" -PolicyStore PersistentStore -ErrorAction SilentlyContinue
+        Write-Host "Ping successful. Proceeding to remove old default gateway(s)."
+        # Remove from both PersistentStore and ActiveStore
+        $stores = @("PersistentStore", "ActiveStore")
+        foreach ($store in $stores) {{
+            $oldRoutes = Get-NetRoute -PolicyStore $store | Where-Object {{ $_.DestinationPrefix -eq "0.0.0.0/0" -and $_.NextHop -eq $currentGateway }}
+            foreach ($route in $oldRoutes) {{
+                Write-Host "Removing default gateway: $($route.NextHop) on InterfaceIndex: $($route.InterfaceIndex) from $store ..."
+                try {{
+                    Remove-NetRoute -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop -DestinationPrefix "0.0.0.0/0" -PolicyStore $store -Confirm:$false -ErrorAction SilentlyContinue
+                    Write-Host "Route removed from $store."
+                }} catch {{
+                    Write-Host "Failed to remove route from $store. Error: $_"
+                }}
+            }}
+        }}
+        # Fallback: try route delete (legacy)
+        $legacy = (route print | Select-String $currentGateway)
+        if ($legacy) {{
+            Write-Host "Attempting legacy route delete for $currentGateway ..."
+            route delete 0.0.0.0 $currentGateway
+        }}
+        # Verify removal
+        $remaining = Get-NetRoute | Where-Object {{ $_.DestinationPrefix -eq "0.0.0.0/0" -and $_.NextHop -eq $currentGateway }}
+        if ($remaining) {{
+            Write-Host "WARNING: Old default gateway(s) still present after attempted removal!"
+            $remaining | Format-Table -AutoSize | Out-String | Write-Host
+        }} else {{
+            Write-Host "Old default gateway(s) fully removed."
         }}
     }} else {{
-        Write-Host "Ping failed after adding new default gateway. Old default gateway will NOT be removed."
+        Write-Host "Ping failed after adding new default gateway. Old default gateway(s) will NOT be removed."
     }}
     '''
     try:
         result_gateway = session.run_ps(powershell_script_gateway)
-        logs.append(result_gateway.std_out.decode())
-        if result_gateway.std_err:
-            logs.append(f"Error: {result_gateway.std_err.decode()}")
+        gateway_out = result_gateway.std_out.decode()
+        gateway_err = result_gateway.std_err.decode() if result_gateway.std_err else ""
+        logs.append(gateway_out)
+        print(gateway_out)
+        if gateway_err:
+            logs.append(f"Error: {gateway_err}")
+            print(f"Error: {gateway_err}")
     except (winrm.exceptions.WinRMTransportError, socket.timeout) as e:
         logs.append("WinRM connection lost after gateway change. This is expected if the new gateway breaks public connectivity.")
+        print("WinRM connection lost after gateway change. This is expected if the new gateway breaks public connectivity.")
     return logs, old_gw
 
-def detect_default_gateways_winrm(win_instance):
-    """
-    Detect all current default gateways (0.0.0.0/0) on a Windows instance via WinRM.
-    Returns a list of gateway IPs (strings).
-    """
-    from . import winrm
-    session = winrm.Session(
-        f'http://{win_instance["PublicIpAddress"]}:5985/wsman',
-        auth=(win_instance["Username"], win_instance["Password"]),
-        transport='basic',
-        server_cert_validation='ignore',
-        read_timeout_sec=20,
-        operation_timeout_sec=10
-    )
-    detect_gateway_script = '''
-    $gws = Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -ExpandProperty NextHop
-    $gws | ForEach-Object { Write-Output $_ }
-    '''
-    result_detect = session.run_ps(detect_gateway_script)
-    detected_gws = [gw.strip() for gw in result_detect.std_out.decode().splitlines() if gw.strip()]
-    return detected_gws
-
-def delete_default_gateway_winrm(win_instance, gateway_ip):
-    """
-    Delete a specific default gateway (0.0.0.0/0 via gateway_ip) on a Windows instance via WinRM.
-    Returns logs (list of strings)
-    """
-    from . import winrm
-    session = winrm.Session(
-        f'http://{win_instance["PublicIpAddress"]}:5985/wsman',
-        auth=(win_instance["Username"], win_instance["Password"]),
-        transport='basic',
-        server_cert_validation='ignore',
-        read_timeout_sec=20,
-        operation_timeout_sec=10
-    )
-    powershell_delete_route = f'''
-    Remove-NetRoute -DestinationPrefix "0.0.0.0/0" -NextHop {gateway_ip} -Confirm:$false -ErrorAction SilentlyContinue
-    '''
-    result_delete = session.run_ps(powershell_delete_route)
-    logs = []
-    logs.append(result_delete.std_out.decode())
-    if result_delete.std_err:
-        logs.append(f"Error: {result_delete.std_err.decode()}")
-    return logs
 
 

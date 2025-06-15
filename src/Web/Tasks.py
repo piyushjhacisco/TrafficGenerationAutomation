@@ -1,7 +1,6 @@
 import logging
 import json
 import winrm
-from src.utils import check_internet_connectivity
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -233,45 +232,3 @@ def launch_and_close_firefox(host, username, password):
         logging.error("WinRM transport error. Ensure WinRM is enabled and configured on the instance.")
     except Exception as e:
         logging.error(f"An error occurred while launching and closing Firefox: {e}")
-
-
-def execute_web_tasks(instance_id, public_ip, instances, instance_file):
-    """
-    Entry point for Web-specific tasks. This function orchestrates all Web tasks.
-    """
-    logging.info(f"Starting Web tasks for instance {instance_id} with Public IP {public_ip}...")
-
-    # Retrieve the instance details (e.g., username, password)
-    instance_details = load_instance_details(instance_id)
-    if not instance_details:
-        logging.error(f"Instance {instance_id} not found in Instance.json. Aborting Web tasks.")
-        return
-
-    username = instance_details.get("Username", "Administrator")
-    password = instance_details.get("Password")
-    if not password:
-        logging.error(f"No password found for instance {instance_id}. Aborting Web tasks.")
-        return
-
-    config = load_config("Config.json", "windows")
-    pac_file = config.get("pac_file")  # Retrieve pac_file from Config.json
-    proxy_url = config.get("proxy_url")
-
-    # Step 1: Check internet connectivity
-    check_internet_connectivity(public_ip, username, password)
-
-    # Step 2: Configure proxy settings
-    configure_proxy(public_ip, username, password, pac_file)
-
-    # Step 3: Install Firefox
-    install_firefox(public_ip, username, password)
-
-    # Step 5: Launch and close Firefox
-    launch_and_close_firefox(public_ip, username, password)
-
-    # Step 4: Configure Firefox proxy settings
-    configure_firefox_proxy(public_ip, username, password, proxy_url)
-
-   
-
-    logging.info(f"Web tasks for instance {instance_id} completed successfully.")

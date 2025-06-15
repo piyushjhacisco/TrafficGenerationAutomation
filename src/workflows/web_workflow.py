@@ -1,18 +1,16 @@
 import streamlit as st
-from src.Web.Tasks import configure_proxy, install_firefox, configure_firefox_proxy, launch_and_close_firefox
 from src.utils import (
     load_config,
     load_instance_file,
     save_instance_file,
     create_instance,
-    get_windows_password,
-    disable_source_destination_check,
-    check_internet_connectivity,
     INSTANCE_JSON_FILE,
     get_instance_details_from_aws,
     show_disable_firewall_and_enable_winrm
 )
 import boto3
+
+from src.Web.Tasks import configure_proxy, install_firefox, configure_firefox_proxy, launch_and_close_firefox
 
 def update_instance_in_json(instance_id, updated_details, instance_file):
     instances = load_instance_file()
@@ -69,7 +67,6 @@ def execute_web_workflow():
             config_with_name["instance_name"] = instance_name
             instance_id, public_ip, private_ip = create_instance(config_with_name)
             if instance_id:
-                disable_source_destination_check(instance_id)
                 details = {
                     "InstanceId": instance_id,
                     "PublicIpAddress": public_ip,
@@ -90,16 +87,22 @@ def execute_web_workflow():
             else:
                 st.error("Failed to create new instance.")
 
-    if instance_details and instance_details.get("Password"):
+    # Only proceed if instance_details and password are set
+    if not (instance_details and instance_details.get("Password")):
+        return
+
+    # Step 2: Manual - Disable Firewall & Enable WinRM
+    if not st.session_state.get("web_precheck_ok"):
         st.subheader("Step 2: Manual - Disable Firewall & Enable WinRM on Windows")
         show_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
         st.markdown("**RDP Credentials:**")
         st.code(f"Public IP: {instance_details['PublicIpAddress']}\nUsername: {instance_details.get('Username', 'Administrator')}\nPassword: {instance_details['Password']}", language="text")
         if st.button("I have disabled the firewall and enabled WinRM. Continue."):
             st.session_state["web_precheck_ok"] = True
-        if not st.session_state.get("web_precheck_ok"):
-            return
+        return
 
+    # Step 3: Manual - Register the Network in SSE Dashboard
+    if not st.session_state.get("web_network_registered"):
         st.subheader("Step 3: Manual - Register the Network in SSE Dashboard")
         register_steps = f"""
 --- ACTION REQUIRED ---
@@ -112,9 +115,10 @@ Please follow these steps to register the network in the SSE Dashboard:
         st.info("After completing the above steps, click below.")
         if st.button("I have registered the network in SSE Dashboard."):
             st.session_state["web_network_registered"] = True
-        if not st.session_state.get("web_network_registered"):
-            return
+        return
 
+    # Step 4: Check Internet Connectivity (Windows)
+    if not st.session_state.get("web_internet_ok"):
         st.subheader("Step 4: Check Internet Connectivity (Windows)")
         if st.button("Check Connectivity"):
             try:
@@ -127,12 +131,12 @@ Please follow these steps to register the network in the SSE Dashboard:
             except Exception as e:
                 st.error(f"Error: {e}")
                 return
-        if not st.session_state.get("web_internet_ok"):
-            if st.button("Continue after successful connectivity check"):
-                st.session_state["web_internet_ok"] = True
-            else:
-                return
+        if st.button("Continue after successful connectivity check"):
+            st.session_state["web_internet_ok"] = True
+        return
 
+    # Step 5: Configure Proxy Settings (PAC file)
+    if not st.session_state.get("web_proxy_ok"):
         st.subheader("Step 5: Configure Proxy Settings (PAC file)")
         pac_file = st.text_input("Enter PAC file URL:")
         if st.button("Apply Proxy Settings"):
@@ -145,11 +149,16 @@ Please follow these steps to register the network in the SSE Dashboard:
                         pac_file
                     )
                     st.success("Proxy configuration applied successfully.")
+                    st.session_state["web_proxy_ok"] = True
                 except Exception as e:
                     st.error(f"Error: {e}")
                     return
             else:
                 st.warning("Please enter the PAC file URL to proceed.")
+        return
+
+    # Step 6: Install Mozilla Firefox
+    if not st.session_state.get("web_firefox_installed"):
         st.subheader("Step 6: Install Mozilla Firefox")
         if st.button("Install Firefox"):
             try:
@@ -159,10 +168,14 @@ Please follow these steps to register the network in the SSE Dashboard:
                     instance_details["Password"]
                 )
                 st.success("Mozilla Firefox installed successfully.")
+                st.session_state["web_firefox_installed"] = True
             except Exception as e:
                 st.error(f"Error: {e}")
                 return
+        return
 
+    # Step 7: Launch and Close Mozilla Firefox
+    if not st.session_state.get("web_firefox_launched"):
         st.subheader("Step 7: Launch and Close Mozilla Firefox")
         if st.button("Launch and Close Firefox"):
             try:
@@ -172,26 +185,27 @@ Please follow these steps to register the network in the SSE Dashboard:
                     instance_details["Password"]
                 )
                 st.success("Mozilla Firefox launched and closed successfully.")
+                st.session_state["web_firefox_launched"] = True
             except Exception as e:
                 st.error(f"Error: {e}")
                 return
+        return
 
-        st.subheader("Step 8: Configure Proxy Settings in Firefox")
-        firefox_proxy_url = st.text_input("Enter Proxy URL for Firefox:")
-        if st.button("Apply Firefox Proxy Settings"):
-            if firefox_proxy_url:
-                try:
-                    configure_firefox_proxy(
-                        instance_details["PublicIpAddress"],
-                        instance_details.get("Username", "Administrator"),
-                        instance_details["Password"],
-                        firefox_proxy_url
-                    )
-                    st.success("Firefox proxy configuration applied successfully.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                    return
-            else:
-                st.warning("Please enter the Firefox proxy URL to proceed.")
-    else:
-        st.warning("Please confirm you have disabled the firewall and enabled WinRM before continuing.")
+    # Step 8: Configure Proxy Settings in Firefox
+    st.subheader("Step 8: Configure Proxy Settings in Firefox")
+    firefox_proxy_url = st.text_input("Enter Proxy URL for Firefox:")
+    if st.button("Apply Firefox Proxy Settings"):
+        if firefox_proxy_url:
+            try:
+                configure_firefox_proxy(
+                    instance_details["PublicIpAddress"],
+                    instance_details.get("Username", "Administrator"),
+                    instance_details["Password"],
+                    firefox_proxy_url
+                )
+                st.success("Firefox proxy configuration applied successfully.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+                return
+        else:
+            st.warning("Please enter the Firefox proxy URL to proceed.")

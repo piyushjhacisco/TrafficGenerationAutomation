@@ -4,15 +4,12 @@ from src.utils import (
     load_instance_file,
     save_instance_file,
     create_instance,
-    get_windows_password,
     disable_source_destination_check,
     INSTANCE_JSON_FILE,
-    check_internet_connectivity,
     get_instance_details_from_aws,
     show_disable_firewall_and_enable_winrm
 )
 import boto3
-from src.ZTNAClientless.Tasks import execute_ztna_clientless_tasks
 
 def update_instance_in_json(instance_id, updated_details, instance_file):
     instances = load_instance_file()
@@ -234,30 +231,88 @@ def execute_ztna_clientless_workflow():
         return
 
     # Step 7: Download .crt and .key files
-    st.subheader("Step 7: Download SSL Certificate and Key")
-    crt_path = "/etc/ssl/certs/self-signed.crt"
-    key_path = "/etc/ssl/private/self-signed.key"
-    from src.ZTNAClientless.Tasks import fetch_cert_and_key
-    crt_data, key_data, fetch_error = fetch_cert_and_key(
-        instance_details["PublicIpAddress"],
-        instance_details["Username"],
-        ztna_clientless_config["key_file"],
-        crt_path,
-        key_path
-    )
-
-    if crt_data is not None:
-        st.download_button("Download Certificate (.crt)", crt_data, file_name="self-signed.crt")
-    if key_data is not None:
-        st.download_button("Download Private Key (.key)", key_data, file_name="self-signed.key")
-    if crt_data is None or key_data is None:
-        st.warning("Could not fetch certificate or key directly from the instance. Please use the SCP instructions below and upload manually if needed.")
-        if fetch_error:
-            st.error(f"Fetch error: {fetch_error}")
-        st.code(f"scp -i <your-key.pem> ubuntu@{instance_details['PublicIpAddress']}:{crt_path} ./self-signed.crt\nscp -i <your-key.pem> ubuntu@{instance_details['PublicIpAddress']}:{key_path} ./self-signed.key", language="bash")
+    # st.subheader("Step 7: Download SSL Certificate and Key")
+    # crt_path = "/etc/ssl/certs/self-signed.crt"
+    # key_path = "/tmp/self-signed.key"  # Download from /tmp, not /etc/ssl/private
+    # from src.ZTNAClientless.Tasks import fetch_cert_and_key
+    # import base64
+    # import tempfile
+    # import subprocess
+    # crt_data, key_data, fetch_error = fetch_cert_and_key(
+    #     instance_details["PublicIpAddress"],
+    #     instance_details["Username"],
+    #     ztna_clientless_config["key_file"],
+    #     crt_path,
+    #     key_path
+    # )
+    # def try_scp_download(remote_path, local_suffix):
+    #     try:
+    #         with tempfile.NamedTemporaryFile(delete=False, suffix=local_suffix) as tmp:
+    #             scp_cmd = [
+    #                 "scp",
+    #                 "-i", ztna_clientless_config["key_file"],
+    #                 f"{instance_details['Username']}@{instance_details['PublicIpAddress']}:{remote_path}",
+    #                 tmp.name
+    #             ]
+    #             result = subprocess.run(scp_cmd, capture_output=True)
+    #             if result.returncode == 0:
+    #                 with open(tmp.name, "rb") as f:
+    #                     return f.read(), None
+    #             else:
+    #                 return None, result.stderr.decode()
+    #     except Exception as e:
+    #         return None, str(e)
+    # def ensure_bytes(data):
+    #     if data is None:
+    #         return None
+    #     if isinstance(data, bytes):
+    #         return data
+    #     if isinstance(data, str):
+    #         return data.encode()
+    #     return None
+    # crt_data_bytes = ensure_bytes(crt_data)
+    # key_data_bytes = ensure_bytes(key_data)
+    # if crt_data_bytes is not None and key_data_bytes is not None:
+    #     st.download_button("Download Certificate (.crt)", crt_data_bytes, file_name="self-signed.crt")
+    #     st.download_button("Download Private Key (.key)", key_data_bytes, file_name="self-signed.key")
+    #     st.success("Certificate and key fetched directly from the instance.")
+    # else:
+    #     st.warning("Could not fetch certificate or key directly from the instance via SFTP. Trying SCP fallback...")
+    #     crt_scp, crt_scp_err = try_scp_download(crt_path, ".crt")
+    #     key_scp, key_scp_err = try_scp_download(key_path, ".key")
+    #     if crt_scp and key_scp:
+    #         st.download_button("Download Certificate (.crt) [SCP]", crt_scp, file_name="self-signed.crt")
+    #         st.download_button("Download Private Key (.key) [SCP]", key_scp, file_name="self-signed.key")
+    #         st.success("Certificate and key fetched using SCP.")
+    #     else:
+    #         st.error("Could not fetch certificate or key using SCP. Showing base64 content for manual copy.")
+    #         if crt_scp_err:
+    #             st.error(f"SCP error (crt): {crt_scp_err}")
+    #         if key_scp_err:
+    #             st.error(f"SCP error (key): {key_scp_err}")
+    #         import paramiko
+    #         try:
+    #             ssh = paramiko.SSHClient()
+    #             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    #             private_key = paramiko.RSAKey.from_private_key_file(ztna_clientless_config["key_file"])
+    #             ssh.connect(hostname=instance_details["PublicIpAddress"], username=instance_details["Username"], pkey=private_key, timeout=10)
+    #             def get_b64(path):
+    #                 stdin, stdout, stderr = ssh.exec_command(f"base64 {path}")
+    #                 return stdout.read().decode().strip()
+    #             crt_b64 = get_b64(crt_path)
+    #             key_b64 = get_b64(key_path)
+    #             ssh.close()
+    #             st.text_area("CRT file (base64, copy and decode)", crt_b64, height=120)
+    #             st.text_area("KEY file (base64, copy and decode)", key_b64, height=120)
+    #             st.info("Copy the above base64 content and decode it to get the files. Example: echo '<content>' | base64 -d > self-signed.crt")
+    #         except Exception as e:
+    #             st.error(f"Failed to fetch base64 content: {e}")
+    #         st.code(f"scp -i <your-key.pem> ubuntu@{instance_details['PublicIpAddress']}:{crt_path} ./self-signed.crt\nscp -i <your-key.pem> ubuntu@{instance_details['PublicIpAddress']}:{key_path} ./self-signed.key", language="bash")
+    #         if fetch_error:
+    #             st.error(f"Fetch error: {fetch_error}")
 
     # Step 8: Manual Steps – Complete ZTNA Clientless Setup
-    st.subheader("Step 8: Manual Steps – Complete ZTNA Clientless Setup")
+    st.subheader("Step 7: Manual Steps – Complete ZTNA Clientless Setup")
     st.markdown(f"""
 #### Step 1: Register the Instance as a Private Resource in SSE Dashboard
 - Go to the SSE Dashboard.

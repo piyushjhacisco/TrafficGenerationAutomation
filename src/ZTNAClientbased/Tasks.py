@@ -16,10 +16,10 @@ from src.utils import ssh_connect_with_retry, sftp_transfer, retry_command, inst
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Paths for additional files
-ZIP_FILE = "ZTNAClientbased/cisco-secure-client.zip"
-HOSTS_FILE = "ZTNAClientbased/files/zta-staging.txt"
-CERT_FILE = "ZTNAClientbased/files/secure_access_signing_nonprod.p7b"
-ENROLLMENT_FILE = "ZTNAClientbased/files/ztaEnroll_saml_commercial_int_stage.json"
+ZIP_FILE = "src/ZTNAClientbased/cisco-secure-client.zip"
+HOSTS_FILE = "src/ZTNAClientbased/files/zta-staging.txt"
+CERT_FILE = "src/ZTNAClientbased/files/secure_access_signing_nonprod.p7b"
+ENROLLMENT_FILE = "src/ZTNAClientbased/files/ztaEnroll_saml_commercial_int_stage.json"
 
 # Remote directories
 REMOTE_ZIP_PATH = r"C:\Users\Administrator\Downloads\cisco-secure-client.zip"
@@ -202,32 +202,45 @@ def setup_ssh_server(public_ip, username, password):
         return False
     
 
-def unzip_file_ssh(public_ip, username, private_key_file, remote_zip_path, remote_unzip_dir):
-    try:
-        # PowerShell command to unzip the file
-        unzip_command = f"powershell Expand-Archive -Path '{remote_zip_path}' -DestinationPath '{remote_unzip_dir}' -Force"
-
-        # Execute the command using SSH with options to auto-accept host keys and never prompt for password
-        command = [
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
-            "-i", private_key_file,
-            f"{username}@{public_ip}",
-            unzip_command
-        ]
-        logging.info(f"Executing unzip command on {public_ip}...")
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-        if result.returncode != 0:
-            logging.error(f"Failed to unzip file: {result.stderr.decode().strip()}")
+def unzip_file_ssh(public_ip, username, password, remote_zip_path, remote_unzip_dir):
+    """
+    Unzip a file on the remote Windows instance using Paramiko SSH with password authentication.
+    Uses the exact same authentication and connection logic as transfer_file_with_paramiko.
+    """
+    import time
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            logging.info(f"Connecting to {public_ip} as {username} for unzip... (attempt {attempt+1})")
+            ssh.connect(hostname=public_ip, username=username, password=password, allow_agent=False, look_for_keys=False, timeout=20)
+            logging.info("SSH connection established successfully.")
+            unzip_command = f"powershell Expand-Archive -Path '{remote_zip_path}' -DestinationPath '{remote_unzip_dir}' -Force"
+            logging.info(f"Executing unzip command on {public_ip}...")
+            stdin, stdout, stderr = ssh.exec_command(unzip_command)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status == 0:
+                logging.info("Unzipped successfully.")
+                ssh.close()
+                return True
+            else:
+                err = stderr.read().decode().strip()
+                logging.error(f"Failed to unzip file: {err}")
+                ssh.close()
+                return False
+        except paramiko.ssh_exception.SSHException as e:
+            if "Error reading SSH protocol banner" in str(e) and attempt < max_retries - 1:
+                logging.warning(f"SSH banner error, retrying in 5 seconds... ({attempt+1}/{max_retries})")
+                time.sleep(5)
+                continue
+            logging.error(f"SSH connection error: {e}")
             return False
-
-        logging.info("Unzipped successfully.")
-        return True
-    except Exception as e:
-        logging.error(f"An error occurred during unzipping: {str(e)}")
-        return False
+        except Exception as e:
+            logging.error(f"An error occurred during unzipping: {e}")
+            return False
+    logging.error("Failed to connect after multiple retries.")
+    return False
     
 def replace_hosts_file(public_ip, username, password, org_id, local_hosts_file, remote_hosts_path):
    
@@ -270,8 +283,11 @@ import paramiko
 import os
 import logging
 
-def copy_additional_files_paramiko(public_ip, username, key_or_password, cert_file, enrollment_file, remote_cacerts_dir, remote_enrollment_dir):
-
+def copy_additional_files_paramiko(public_ip, username, password, cert_file, enrollment_file, remote_cacerts_dir, remote_enrollment_dir):
+    """
+    Copy additional files to the remote Windows instance using Paramiko SFTP with password authentication.
+    Uses the exact same authentication and connection logic as transfer_file_with_paramiko.
+    """
     import time
     max_retries = 5
     for attempt in range(max_retries):
@@ -279,13 +295,7 @@ def copy_additional_files_paramiko(public_ip, username, key_or_password, cert_fi
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             logging.info(f"Connecting to {public_ip} as {username}... (attempt {attempt+1})")
-            if username.lower() == "administrator":
-                # Windows: use password authentication
-                ssh.connect(hostname=public_ip, username=username, password=key_or_password, allow_agent=False, look_for_keys=False, timeout=20)
-            else:
-                # Linux: use key authentication
-                pkey = paramiko.RSAKey.from_private_key_file(key_or_password)
-                ssh.connect(hostname=public_ip, username=username, pkey=pkey, allow_agent=False, look_for_keys=False, timeout=20)
+            ssh.connect(hostname=public_ip, username=username, password=password, allow_agent=False, look_for_keys=False, timeout=20)
             logging.info("SSH connection established successfully.")
             sftp = ssh.open_sftp()
             cert_remote_path = os.path.join(remote_cacerts_dir, "secure_access_signing_nonprod.p7b").replace("\\", "/")
@@ -315,62 +325,3 @@ def copy_additional_files_paramiko(public_ip, username, key_or_password, cert_fi
             return False
     logging.error("Failed to connect after multiple retries.")
     return False
-    
-# ----------------------------- Centralized Function -----------------------------
-
-def execute_ztna_clientbased_tasks(public_ip, username, password, key_file, org_id, config):
-    """
-    Centralized function to execute ZTNA-Clientbased tasks.
-    Orchestrates module installation, SSH setup, file transfers, and configuration.
-    """
-    logging.info(f"Starting ZTNA-Clientbased tasks on instance with Public IP: {public_ip}...")
-
-    # Step 1: Set up SSH server
-    logging.info("Setting up SSH server...")
-    if not setup_ssh_server(public_ip, username, password):
-        logging.error("Failed to set up SSH server. Exiting...")
-        return
-
-    # Step 2: Transfer ZIP file
-    logging.info("Transferring ZIP file...")
-    if not transfer_file_with_paramiko(password, ZIP_FILE, username, public_ip, REMOTE_ZIP_PATH):
-        logging.error("Failed to transfer ZIP file. Exiting...")
-        return
-
-    # Step 3: Unzip the ZIP file
-    logging.info("Unzipping file...")
-    if not unzip_file_ssh(public_ip, username, key_file, REMOTE_ZIP_PATH, REMOTE_UNZIP_DIR):
-        logging.error("Failed to unzip file. Exiting...")
-        return
-
-    # Step 4: Process modules
-    session = create_winrm_session(public_ip, username, password)
-    modules = [
-        {"name": "Core VPN", "keyword": "core-vpn", "log_file": "C:/Users/Administrator/core-install.log"},
-        {"name": "DART", "keyword": "dart", "log_file": "C:/Users/Administrator/dart-install.log"},
-        {"name": "ZTA", "keyword": "zta", "log_file": "C:/Users/Administrator/zta-install.log"},
-    ]
-
-    for module in modules:
-        logging.info(f"Processing module: {module['name']}")
-        installer_path = find_installer(session, REMOTE_UNZIP_DIR, module["keyword"])
-        if not installer_path:
-            logging.warning(f"Skipping module '{module['name']}' as no installer was found.")
-            continue
-        if not install_msi(session, installer_path, module["log_file"]):
-            logging.error(f"Failed to install module '{module['name']}'. Exiting...")
-            return
-
-    # Step 5: Replace hosts file
-    logging.info("Replacing hosts file...")
-    if not replace_hosts_file(public_ip, username, password, org_id, HOSTS_FILE, "C:\\Windows\\System32\\drivers\\etc\\hosts"):
-        logging.error("Failed to replace hosts file. Exiting...")
-        return
-
-    # Step 6: Copy additional files
-    logging.info("Copying additional files...")
-    if not copy_additional_files_paramiko(public_ip, username, password, CERT_FILE, ENROLLMENT_FILE, REMOTE_CACERTS_DIR, REMOTE_ENROLLMENT_DIR):
-        logging.error("Failed to copy additional files. Exiting...")
-        return
-
-    logging.info("ZTNA-Clientbased tasks completed successfully.")

@@ -12,7 +12,6 @@ from src.utils import (
     show_disable_firewall_and_enable_winrm
 )
 import boto3
-from src.ZTNAClientbased.Tasks import execute_ztna_clientbased_tasks
 
 def update_instance_in_json(instance_id, updated_details, instance_file):
     instances = load_instance_file()
@@ -272,7 +271,7 @@ def execute_ztna_clientbased_workflow():
             ok = copy_additional_files_paramiko(
                 instance_details["PublicIpAddress"],
                 instance_details["Username"],
-                ztna_config["key_file"],
+                instance_details["Password"],  # <-- Use the Windows password, not the key file
                 CERT_FILE, ENROLLMENT_FILE, REMOTE_CACERTS_DIR, REMOTE_ENROLLMENT_DIR
             )
             if ok:

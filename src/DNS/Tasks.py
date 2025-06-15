@@ -1,9 +1,6 @@
 import json
 import winrm
 import logging
-import boto3
-import os
-from src.utils import check_internet_connectivity
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -64,29 +61,3 @@ def configure_dns(host, username, password, primary_dns, alternate_dns):
         logging.error("WinRM transport error. Ensure WinRM is enabled and configured on the instance.")
     except Exception as e:
         logging.error(f"An error occurred while changing the DNS server: {e}")
-
-def execute_dns_tasks(instance_id, public_ip, instances, instance_file):
-    """
-    Entry point for DNS-specific tasks. This function orchestrates all DNS tasks.
-    """
-    logging.info(f"Starting DNS tasks for instance {instance_id} with Public IP {public_ip}...")
-
-    # Retrieve the instance details (e.g., password)
-    instance_details = load_instance_details(instance_id)
-    if not instance_details:
-        logging.error(f"Instance {instance_id} not found in Instance.json. Aborting DNS tasks.")
-        return
-
-    username = instance_details.get("Username", "Administrator")
-    password = instance_details.get("Password")
-    if not password:
-        logging.error(f"No password found for instance {instance_id}. Aborting DNS tasks.")
-        return
-
-    # Step 1: Check internet connectivity
-    check_internet_connectivity(public_ip, username, password)
-    
-    # Step 2: Configure DNS settings
-    configure_dns(public_ip, username, password)
-
-    logging.info(f"DNS tasks for instance {instance_id} completed successfully.")
