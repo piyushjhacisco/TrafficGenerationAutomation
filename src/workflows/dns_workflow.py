@@ -1,5 +1,5 @@
 import streamlit as st
-from src.DNS.Tasks import check_internet_connectivity, configure_dns
+from src.DNS.Tasks import configure_dns
 from src.utils import (
     load_config,
     load_instance_file,
@@ -9,7 +9,8 @@ from src.utils import (
     disable_source_destination_check,
     INSTANCE_JSON_FILE,
     get_instance_details_from_aws,
-    show_disable_firewall_and_enable_winrm
+    show_disable_firewall_and_enable_winrm,
+    check_internet_connectivity
 )
 import boto3
 
@@ -144,9 +145,18 @@ Please follow these steps to register the network in the SSE Dashboard:
                         alternate_dns
                     )
                     st.success("DNS configuration applied successfully.")
-                    st.success("All DNS tasks completed successfully!")
+                    st.session_state["dns_task_ok"] = True
                 except Exception as e:
                     st.error(f"Error: {e}")
                     return
             else:
                 st.warning("Please enter both Primary and Alternate DNS IPs to proceed.")
+
+    # Final step: All done
+    if all([
+        st.session_state.get("dns_precheck_ok"),
+        st.session_state.get("dns_internet_ok"),
+        st.session_state.get("dns_task_ok")
+    ]):
+        st.success("DNS workflow completed successfully!")
+        st.balloons()

@@ -8,7 +8,10 @@ from src.utils import (
     INSTANCE_JSON_FILE,
     get_instance_details_from_aws,
     show_disable_firewall_and_enable_winrm,
+    get_windows_password,
+    check_internet_connectivity
 )
+from src.Firewall.Tasks import change_default_gateway_winrm
 import boto3
 import winrm
 
@@ -115,7 +118,7 @@ def execute_firewall_workflow():
     st.subheader("Step 3: Check Internet Connectivity (Windows)")
     if st.button("Check Connectivity (Windows)", disabled=st.session_state["fw_step_running"]):
         try:
-            fw_check_internet_connectivity(
+            check_internet_connectivity(
                 win_instance["PublicIpAddress"],
                 win_instance["Username"],
                 win_instance["Password"]
@@ -259,12 +262,14 @@ def execute_firewall_workflow():
             import json
             with open("ipsec_details.json", "w") as f:
                 json.dump(ipsec_details, f, indent=4)
-            from src.Firewall.Tasks import load_config as fw_load_config, ssh_and_configure_ipsec
-            ubuntu_config = fw_load_config("Config.json", "linux")
+            # Use load_config from src.utils, not from src.Firewall.Tasks
+            ubuntu_config = load_config("Config.json")
+            ubuntu_linux_config = next((c for c in ubuntu_config if c.get("type", "").lower() == "linux"), None)
+            from src.Firewall.Tasks import ssh_and_configure_ipsec
             logs = ssh_and_configure_ipsec(
                 linux_instance["PublicIpAddress"],
                 linux_instance["Username"],
-                ubuntu_config["key_file"],
+                ubuntu_linux_config["key_file"],
                 ipsec_details
             )
             st.session_state["fw_ipsec_ok"] = True
@@ -299,4 +304,13 @@ def execute_firewall_workflow():
                 st.text_area("Change Default Gateway Logs", traceback.format_exc(), height=200)
     else:
         st.warning("Please select or create a Windows instance and set st.session_state['fw_win_instance'] before testing this step.")
+
+    # Final step: All done
+    if all([
+        st.session_state.get("firewall_precheck_ok"),
+        st.session_state.get("firewall_internet_ok"),
+        st.session_state.get("firewall_task_ok")
+    ]):
+        st.success("Firewall workflow completed successfully!")
+        st.balloons()
 

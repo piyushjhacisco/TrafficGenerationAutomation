@@ -331,3 +331,12 @@ def execute_ztna_clientless_workflow():
 
 ---
 """)
+
+    # Final step: All done
+    if all([
+        st.session_state.get("ztna_clientless_precheck_ok"),
+        st.session_state.get("ztna_clientless_internet_ok"),
+        st.session_state.get("ztna_clientless_task_ok")
+    ]):
+        st.success("ZTNA Clientless workflow completed successfully!")
+        st.balloons()

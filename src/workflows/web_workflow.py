@@ -6,10 +6,11 @@ from src.utils import (
     create_instance,
     INSTANCE_JSON_FILE,
     get_instance_details_from_aws,
-    show_disable_firewall_and_enable_winrm
+    show_disable_firewall_and_enable_winrm,
+    get_windows_password,
+    check_internet_connectivity
 )
 import boto3
-
 from src.Web.Tasks import configure_proxy, install_firefox, configure_firefox_proxy, launch_and_close_firefox
 
 def update_instance_in_json(instance_id, updated_details, instance_file):
@@ -33,7 +34,7 @@ def execute_web_workflow():
         st.error("No Windows config found in Config.json.")
         return
 
-    st.subheader("Step 1: Instance Management")
+    # Step 1: Instance Management
     reuse = st.radio("Do you want to reuse an existing instance for Web?", ["Yes", "No"])
     instance_details = None
     if reuse == "Yes":
@@ -45,8 +46,6 @@ def execute_web_workflow():
                 st.success("Instance found in Instance.json.")
                 st.json(instance)
                 instance_details = instance
-                if instance.get("PublicIpAddress"):
-                    show_disable_firewall_and_enable_winrm(instance["PublicIpAddress"])
             else:
                 st.info("Instance not found in Instance.json. Will fetch from AWS if you click below.")
                 if st.button("Fetch from AWS"):
@@ -56,8 +55,6 @@ def execute_web_workflow():
                         st.success("Fetched and saved instance details from AWS.")
                         st.json(details)
                         instance_details = details
-                        if details.get("PublicIpAddress"):
-                            show_disable_firewall_and_enable_winrm(details["PublicIpAddress"])
                     else:
                         st.error("Failed to fetch instance details from AWS.")
     else:
@@ -82,44 +79,42 @@ def execute_web_workflow():
                 st.success("New instance created and saved.")
                 st.json(details)
                 instance_details = details
-                if details.get("PublicIpAddress"):
-                    show_disable_firewall_and_enable_winrm(details["PublicIpAddress"])
             else:
                 st.error("Failed to create new instance.")
 
+    # Track instance details in session state
     # Only proceed if instance_details and password are set
+    if instance_details and instance_details.get("Password"):
+        st.session_state["web_instance_details"] = instance_details
+    instance_details = st.session_state.get("web_instance_details")
     if not (instance_details and instance_details.get("Password")):
         return
 
     # Step 2: Manual - Disable Firewall & Enable WinRM
+    st.subheader("Step 2: Manual - Disable Firewall & Enable WinRM on Windows")
+    show_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
+    st.markdown("**RDP Credentials:**")
+    st.code(f"Public IP: {instance_details['PublicIpAddress']}\nUsername: {instance_details.get('Username', 'Administrator')}\nPassword: {instance_details['Password']}", language="text")
     if not st.session_state.get("web_precheck_ok"):
-        st.subheader("Step 2: Manual - Disable Firewall & Enable WinRM on Windows")
-        show_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
-        st.markdown("**RDP Credentials:**")
-        st.code(f"Public IP: {instance_details['PublicIpAddress']}\nUsername: {instance_details.get('Username', 'Administrator')}\nPassword: {instance_details['Password']}", language="text")
         if st.button("I have disabled the firewall and enabled WinRM. Continue."):
             st.session_state["web_precheck_ok"] = True
-        return
-
     # Step 3: Manual - Register the Network in SSE Dashboard
-    if not st.session_state.get("web_network_registered"):
-        st.subheader("Step 3: Manual - Register the Network in SSE Dashboard")
-        register_steps = f"""
+    st.subheader("Step 3: Manual - Register the Network in SSE Dashboard")
+    register_steps = f"""
 --- ACTION REQUIRED ---
 Please follow these steps to register the network in the SSE Dashboard:
 1. Go to **SSE Dashboard** → **Resources** → **Registered Networks** → Click on **Add Network**
 2. Provide any Network Name and in **IPv4 Address** provide the public IP of the Windows client machine: **{instance_details.get('PublicIpAddress', 'N/A')}**
 3. Click on Save.
 """
-        st.code(register_steps, language="text")
-        st.info("After completing the above steps, click below.")
+    st.code(register_steps, language="text")
+    st.info("After completing the above steps, click below.")
+    if not st.session_state.get("web_network_registered"):
         if st.button("I have registered the network in SSE Dashboard."):
             st.session_state["web_network_registered"] = True
-        return
-
     # Step 4: Check Internet Connectivity (Windows)
+    st.subheader("Step 4: Check Internet Connectivity (Windows)")
     if not st.session_state.get("web_internet_ok"):
-        st.subheader("Step 4: Check Internet Connectivity (Windows)")
         if st.button("Check Connectivity"):
             try:
                 check_internet_connectivity(
@@ -128,17 +123,18 @@ Please follow these steps to register the network in the SSE Dashboard:
                     instance_details["Password"],
                 )
                 st.success("Internet connectivity check completed successfully.")
+                st.session_state["web_internet_ok"] = True
             except Exception as e:
                 st.error(f"Error: {e}")
-                return
-        if st.button("Continue after successful connectivity check"):
-            st.session_state["web_internet_ok"] = True
-        return
-
     # Step 5: Configure Proxy Settings (PAC file)
+    st.subheader("Step 5: Configure Proxy Settings (PAC file)")
+    st.info("""
+For PAC file you have to obtain it by following the below steps:
+1. Login to SSE Dashboard, then navigate to **Connect → End User Connectivity → Internet Security**
+2. Copy the Secure Access PAC file and store it somewhere to use further.
+""")
+    pac_file = st.text_input("Enter PAC file URL:")
     if not st.session_state.get("web_proxy_ok"):
-        st.subheader("Step 5: Configure Proxy Settings (PAC file)")
-        pac_file = st.text_input("Enter PAC file URL:")
         if st.button("Apply Proxy Settings"):
             if pac_file:
                 try:
@@ -152,14 +148,11 @@ Please follow these steps to register the network in the SSE Dashboard:
                     st.session_state["web_proxy_ok"] = True
                 except Exception as e:
                     st.error(f"Error: {e}")
-                    return
             else:
                 st.warning("Please enter the PAC file URL to proceed.")
-        return
-
     # Step 6: Install Mozilla Firefox
+    st.subheader("Step 6: Install Mozilla Firefox")
     if not st.session_state.get("web_firefox_installed"):
-        st.subheader("Step 6: Install Mozilla Firefox")
         if st.button("Install Firefox"):
             try:
                 install_firefox(
@@ -171,12 +164,9 @@ Please follow these steps to register the network in the SSE Dashboard:
                 st.session_state["web_firefox_installed"] = True
             except Exception as e:
                 st.error(f"Error: {e}")
-                return
-        return
-
     # Step 7: Launch and Close Mozilla Firefox
+    st.subheader("Step 7: Launch and Close Mozilla Firefox")
     if not st.session_state.get("web_firefox_launched"):
-        st.subheader("Step 7: Launch and Close Mozilla Firefox")
         if st.button("Launch and Close Firefox"):
             try:
                 launch_and_close_firefox(
@@ -188,11 +178,9 @@ Please follow these steps to register the network in the SSE Dashboard:
                 st.session_state["web_firefox_launched"] = True
             except Exception as e:
                 st.error(f"Error: {e}")
-                return
-        return
-
     # Step 8: Configure Proxy Settings in Firefox
     st.subheader("Step 8: Configure Proxy Settings in Firefox")
+    st.info("Contact SWG team and get the Proxy URL directly (all the PAC file points to the proxy URL only)")
     firefox_proxy_url = st.text_input("Enter Proxy URL for Firefox:")
     if st.button("Apply Firefox Proxy Settings"):
         if firefox_proxy_url:
@@ -206,6 +194,15 @@ Please follow these steps to register the network in the SSE Dashboard:
                 st.success("Firefox proxy configuration applied successfully.")
             except Exception as e:
                 st.error(f"Error: {e}")
-                return
-        else:
-            st.warning("Please enter the Firefox proxy URL to proceed.")
+
+    # Final step: All done
+    if all([
+        st.session_state.get("web_precheck_ok"),
+        st.session_state.get("web_network_registered"),
+        st.session_state.get("web_internet_ok"),
+        st.session_state.get("web_proxy_ok"),
+        st.session_state.get("web_firefox_installed"),
+        st.session_state.get("web_firefox_launched")
+    ]):
+        st.success("Web workflow completed successfully!")
+        st.balloons()

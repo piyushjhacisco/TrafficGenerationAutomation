@@ -193,7 +193,7 @@ def execute_ztna_clientbased_workflow():
             ok = unzip_file_ssh(
                 instance_details["PublicIpAddress"],
                 instance_details["Username"],
-                ztna_config["key_file"],
+                instance_details["Password"],
                 REMOTE_ZIP_PATH, REMOTE_UNZIP_DIR
             )
             if ok:

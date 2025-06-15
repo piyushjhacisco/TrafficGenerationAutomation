@@ -186,12 +186,16 @@ def setup_ssh_server(public_ip, username, password):
         # Allow SSH traffic through the Windows Firewall
         logging.info("Allowing SSH traffic through the Windows Firewall...")
         firewall_command = """
-        New-NetFirewallRule -Name "SSH" -DisplayName "OpenSSH Server (TCP-In)" -Protocol TCP -LocalPort 22 -Action Allow -Direction Inbound
+        New-NetFirewallRule -Name \"SSH\" -DisplayName \"OpenSSH Server (TCP-In)\" -Protocol TCP -LocalPort 22 -Action Allow -Direction Inbound
         """
         result = session.run_ps(firewall_command)
         if result.status_code != 0:
-            logging.error(f"Failed to configure the Windows Firewall for SSH: {result.std_err.decode().strip()}")
-            return False
+            std_err = result.std_err.decode().strip()
+            if "Cannot create a file when that file already exists" in std_err or "ResourceExists" in std_err:
+                logging.warning("Firewall rule 'SSH' already exists. Continuing...")
+            else:
+                logging.error(f"Failed to configure the Windows Firewall for SSH: {std_err}")
+                return False
 
         logging.info("OpenSSH Server installed, started, and configured successfully.")
         logging.info("Password-based authentication remains enabled.")
