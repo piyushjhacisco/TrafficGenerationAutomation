@@ -1,18 +1,9 @@
 [
     {
         "InstanceId": "i-0ce927bfd976603ba",
-        "PublicIpAddress": "18.237.94.114",
         "PrivateIpAddress": "172.31.23.32",
         "InstanceType": "t2.micro",
         "Username": "ubuntu"
-    },
-    {
-        "InstanceId": "i-05c79df27a184e1e2",
-        "PublicIpAddress": "44.249.157.178",
-        "PrivateIpAddress": "172.31.16.33",
-        "InstanceType": "t3.medium",
-        "Password": "ITGz1Iw($OYR5B%GMgu5Jy(4o6rsxVN*",
-        "Username": "Administrator"
     },
     {
         "InstanceId": "i-07445e07e8a615d95",
@@ -35,6 +26,14 @@
         "PrivateIpAddress": "172.31.31.90",
         "InstanceType": "t3.medium",
         "Password": "63Mg;nP.WZ-&ww93XNMwmbVfN8;22Okj",
+        "Username": "Administrator"
+    },
+    {
+        "InstanceId": "i-05c79df27a184e1e2",
+        "PublicIpAddress": "44.249.157.178",
+        "PrivateIpAddress": "172.31.16.33",
+        "InstanceType": "t3.medium",
+        "Password": "ITGz1Iw($OYR5B%GMgu5Jy(4o6rsxVN*",
         "Username": "Administrator"
     }
 ]
