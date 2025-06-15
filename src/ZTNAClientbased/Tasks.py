@@ -10,6 +10,7 @@ import paramiko
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
+from src.utils import ssh_connect_with_retry, sftp_transfer, retry_command, install_with_retries
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -84,22 +85,7 @@ def install_modules_ssh(public_ip, username, private_key_file, remote_unzip_dir,
             """
 
             # Execute the search command using SSH
-            command = [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-i", private_key_file,
-                f"{username}@{public_ip}",
-                search_command
-            ]
-            logging.info(f"Searching for installer with keyword '{keyword}'...")
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            if result.returncode != 0:
-                logging.error(f"Failed to search for installer with keyword '{keyword}': {result.stderr.decode().strip()}")
-                return False
-
-            # Get the installer path from the output
-            installer_path = result.stdout.decode().strip()
+            installer_path = ssh_connect_with_retry(public_ip, username, private_key_file, search_command)
             if not installer_path:
                 logging.warning(f"No installer found for keyword '{keyword}'. Skipping...")
                 continue
@@ -110,17 +96,8 @@ def install_modules_ssh(public_ip, username, private_key_file, remote_unzip_dir,
             install_command = f"powershell Start-Process -FilePath '{installer_path}' -ArgumentList '/quiet /norestart' -Wait"
 
             # Execute the install command using SSH
-            command = [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-i", private_key_file,
-                f"{username}@{public_ip}",
-                install_command
-            ]
-            logging.info(f"Installing module '{keyword}'...")
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            if result.returncode != 0:
+            result = ssh_connect_with_retry(public_ip, username, private_key_file, install_command)
+            if not result:
                 logging.error(f"Failed to install module '{keyword}': {result.stderr.decode().strip()}")
                 return False
 
@@ -226,14 +203,15 @@ def setup_ssh_server(public_ip, username, password):
     
 
 def unzip_file_ssh(public_ip, username, private_key_file, remote_zip_path, remote_unzip_dir):
-   
     try:
         # PowerShell command to unzip the file
         unzip_command = f"powershell Expand-Archive -Path '{remote_zip_path}' -DestinationPath '{remote_unzip_dir}' -Force"
 
-        # Execute the command using SSH
+        # Execute the command using SSH with options to auto-accept host keys and never prompt for password
         command = [
             "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
             "-i", private_key_file,
             f"{username}@{public_ip}",
             unzip_command
@@ -292,46 +270,51 @@ import paramiko
 import os
 import logging
 
-def copy_additional_files_paramiko(public_ip, username, private_key_file, cert_file, enrollment_file, remote_cacerts_dir, remote_enrollment_dir):
+def copy_additional_files_paramiko(public_ip, username, key_or_password, cert_file, enrollment_file, remote_cacerts_dir, remote_enrollment_dir):
 
-    try:
-        # Create an SSH client and connect to the instance
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        logging.info(f"Connecting to {public_ip} as {username}...")
-        ssh.connect(hostname=public_ip, username=username, key_filename=private_key_file, timeout=30)
-        logging.info("SSH connection established successfully.")
-
-        # Create an SFTP client
-        sftp = ssh.open_sftp()
-
-        # Copy the certificate file
-        cert_remote_path = os.path.join(remote_cacerts_dir, "secure_access_signing_nonprod.p7b").replace("\\", "/")
-        logging.info(f"Copying certificate file to {cert_remote_path}...")
-        sftp.put(cert_file, cert_remote_path)
-        logging.info("Certificate file copied successfully.")
-
-        # Copy the enrollment file
-        enrollment_remote_path = os.path.join(remote_enrollment_dir, "ztaEnroll_saml_commercial_int_stage.json").replace("\\", "/")
-        logging.info(f"Copying enrollment file to {enrollment_remote_path}...")
-        sftp.put(enrollment_file, enrollment_remote_path)
-        logging.info("Enrollment file copied successfully.")
-
-        # Close the SFTP and SSH connections
-        sftp.close()
-        ssh.close()
-        logging.info("Additional files copied successfully.")
-        return True
-
-    except FileNotFoundError as e:
-        logging.error(f"File not found: {e}")
-        return False
-    except paramiko.SSHException as e:
-        logging.error(f"SSH connection error: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"An error occurred while copying additional files: {e}")
-        return False
+    import time
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            logging.info(f"Connecting to {public_ip} as {username}... (attempt {attempt+1})")
+            if username.lower() == "administrator":
+                # Windows: use password authentication
+                ssh.connect(hostname=public_ip, username=username, password=key_or_password, allow_agent=False, look_for_keys=False, timeout=20)
+            else:
+                # Linux: use key authentication
+                pkey = paramiko.RSAKey.from_private_key_file(key_or_password)
+                ssh.connect(hostname=public_ip, username=username, pkey=pkey, allow_agent=False, look_for_keys=False, timeout=20)
+            logging.info("SSH connection established successfully.")
+            sftp = ssh.open_sftp()
+            cert_remote_path = os.path.join(remote_cacerts_dir, "secure_access_signing_nonprod.p7b").replace("\\", "/")
+            logging.info(f"Copying certificate file to {cert_remote_path}...")
+            sftp.put(cert_file, cert_remote_path)
+            logging.info("Certificate file copied successfully.")
+            enrollment_remote_path = os.path.join(remote_enrollment_dir, "ztaEnroll_saml_commercial_int_stage.json").replace("\\", "/")
+            logging.info(f"Copying enrollment file to {enrollment_remote_path}...")
+            sftp.put(enrollment_file, enrollment_remote_path)
+            logging.info("Enrollment file copied successfully.")
+            sftp.close()
+            ssh.close()
+            logging.info("Additional files copied successfully.")
+            return True
+        except paramiko.ssh_exception.SSHException as e:
+            if "Error reading SSH protocol banner" in str(e) and attempt < max_retries - 1:
+                logging.warning(f"SSH banner error, retrying in 5 seconds... ({attempt+1}/{max_retries})")
+                time.sleep(5)
+                continue
+            logging.error(f"SSH connection error: {e}")
+            return False
+        except FileNotFoundError as e:
+            logging.error(f"File not found: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"An error occurred while copying additional files: {e}")
+            return False
+    logging.error("Failed to connect after multiple retries.")
+    return False
     
 # ----------------------------- Centralized Function -----------------------------
 
@@ -386,7 +369,7 @@ def execute_ztna_clientbased_tasks(public_ip, username, password, key_file, org_
 
     # Step 6: Copy additional files
     logging.info("Copying additional files...")
-    if not copy_additional_files_paramiko(public_ip, username, key_file, CERT_FILE, ENROLLMENT_FILE, REMOTE_CACERTS_DIR, REMOTE_ENROLLMENT_DIR):
+    if not copy_additional_files_paramiko(public_ip, username, password, CERT_FILE, ENROLLMENT_FILE, REMOTE_CACERTS_DIR, REMOTE_ENROLLMENT_DIR):
         logging.error("Failed to copy additional files. Exiting...")
         return
 

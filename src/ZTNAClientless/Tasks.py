@@ -4,6 +4,7 @@ import os
 import time
 import paramiko
 import logging
+from src.utils import ssh_connect_with_retry
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -20,17 +21,8 @@ self_signed_cert_name = "self-signed.crt"
 self_signed_key_name = "self-signed.key"
 
 def connect_to_instance(public_ip, username, key_file):
-    """Connect to the instance using Paramiko."""
-    try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        private_key = paramiko.RSAKey.from_private_key_file(key_file)
-        ssh.connect(hostname=public_ip, username=username, pkey=private_key, timeout=10)
-        logging.info(f"Connected to the instance at {public_ip}")
-        return ssh
-    except Exception as e:
-        logging.error(f"Failed to connect to the instance at {public_ip}: {e}")
-        return None
+    """Connect to the instance using Paramiko (with retry)."""
+    return ssh_connect_with_retry(public_ip, username, key_file=key_file)
 
 def install_nginx(public_ip, username, key_file):
     """Install Nginx on the instance."""
@@ -166,3 +158,45 @@ def execute_ztna_clientless_tasks(public_ip, username, key_file):
         logging.info("ZTNA-Clientless tasks completed successfully.")
     except Exception as e:
         logging.error(f"An error occurred during ZTNA-Clientless tasks: {e}")
+
+def fetch_cert_and_key(public_ip, username, key_file, crt_path, key_path):
+    """
+    Fetch the certificate and key files from the remote instance using SSH/SFTP.
+    If permission is denied, attempt to chmod the files and retry once.
+    Returns (crt_data, key_data, error_message)
+    """
+    import paramiko
+    def try_fetch(ssh):
+        sftp = ssh.open_sftp()
+        try:
+            with sftp.open(crt_path, 'rb') as f:
+                crt_data = f.read()
+            with sftp.open(key_path, 'rb') as f:
+                key_data = f.read()
+            return crt_data, key_data, None
+        finally:
+            sftp.close()
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        private_key = paramiko.RSAKey.from_private_key_file(key_file)
+        ssh.connect(hostname=public_ip, username=username, pkey=private_key, timeout=10)
+        try:
+            # First try
+            try:
+                return try_fetch(ssh)
+            except Exception as e:
+                if "Permission denied" in str(e):
+                    # Try to chmod and retry
+                    try:
+                        ssh.exec_command(f"sudo chmod 644 {crt_path}")
+                        ssh.exec_command(f"sudo chmod 644 {key_path}")
+                        return try_fetch(ssh)
+                    except Exception as e2:
+                        return None, None, f"Permission denied and chmod failed: {e2}"
+                else:
+                    return None, None, str(e)
+        finally:
+            ssh.close()
+    except Exception as e:
+        return None, None, str(e)

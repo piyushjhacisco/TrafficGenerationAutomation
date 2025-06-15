@@ -5,10 +5,9 @@ import shlex
 import logging
 import time
 import textwrap
-import tkinter as tk
-from tkinter import messagebox
 import winrm
 import subprocess
+from src.utils import retry_command, install_with_retries, ssh_connect_with_retry
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -224,7 +223,37 @@ def restart_ipsec_and_tunnel(public_ip, username, key_file):
 
         # Restart IPsec
         logging.info("Restarting IPsec service...")
-        retry_command(ssh, "sudo ipsec restart", retries=3, delay=20)
+        # Custom retry logic to treat expected strongSwan messages as info, not error
+        attempt = 0
+        while attempt < 3:
+            try:
+                stdin, stdout, stderr = ssh.exec_command("sudo ipsec restart")
+                stdout_output = stdout.read().decode().strip()
+                stderr_output = stderr.read().decode().strip()
+                expected_msgs = [
+                    "Stopping strongSwan IPsec...",
+                    "Starting strongSwan"
+                ]
+                if stderr_output:
+                    if all(msg in stderr_output for msg in expected_msgs):
+                        logging.info(f"Expected IPsec restart output: {stderr_output}")
+                        break
+                    elif any(msg in stderr_output for msg in expected_msgs):
+                        logging.info(f"Expected IPsec restart output: {stderr_output}")
+                        break
+                    else:
+                        raise Exception(stderr_output)
+                logging.info(f"IPsec restart output: {stdout_output}")
+                break
+            except Exception as e:
+                logging.error(f"Attempt {attempt + 1} failed for command: sudo ipsec restart. Error: {e}")
+                attempt += 1
+                if attempt < 3:
+                    logging.info(f"Retrying in 20 seconds...")
+                    time.sleep(20)
+                else:
+                    logging.error(f"All retry attempts failed for command: sudo ipsec restart")
+                    raise
         logging.info("IPsec service restarted successfully.")
 
         # Bring up the tunnel
@@ -377,85 +406,52 @@ def ssh_and_configure_ipsec(public_ip, username, key_file, ipsec_details):
     """
     SSH into the instance, enable IP forwarding, install StrongSwan, configure IPsec, 
     and restart the service. Handles retry mechanism and calls task-specific functions.
+    Returns a summary log and raises on failure.
     """
+    import logging
+    logs = []
     failed_steps = []  # Track failed steps for recovery
-
     try:
-        logging.info(f"Starting IPsec configuration on the instance at {public_ip}...")
-
+        logs.append(f"Starting IPsec configuration on the instance at {public_ip}...")
         # Step 1: Enable IP forwarding
         try:
             enable_ip_forwarding(public_ip, username, key_file)
+            logs.append("IP forwarding enabled successfully.")
         except Exception as e:
-            logging.error(f"Step failed: Enable IP forwarding. Error: {e}")
+            logs.append(f"Step failed: Enable IP forwarding. Error: {e}")
             failed_steps.append("Enable IP forwarding")
-
         # Step 2: Install StrongSwan
         try:
             install_strongswan(public_ip, username, key_file)
+            logs.append("StrongSwan installed successfully.")
         except Exception as e:
-            logging.error(f"Step failed: Install StrongSwan. Error: {e}")
+            logs.append(f"Step failed: Install StrongSwan. Error: {e}")
             failed_steps.append("Install StrongSwan")
-
         # Step 3: Update IPsec Configuration
         try:
             update_ipsec_config(public_ip, username, key_file, ipsec_details)
+            logs.append("IPsec configuration files updated successfully.")
         except Exception as e:
-            logging.error(f"Step failed: Update IPsec Configuration. Error: {e}")
+            logs.append(f"Step failed: Update IPsec Configuration. Error: {e}")
             failed_steps.append("Update IPsec Configuration")
-
         # Step 4: Restart IPsec and Bring Up the Tunnel
         try:
             restart_ipsec_and_tunnel(public_ip, username, key_file)
+            logs.append("IPsec service restarted and tunnel brought up successfully.")
         except Exception as e:
-            logging.error(f"Step failed: Restart IPsec and bring up the tunnel. Error: {e}")
+            logs.append(f"Step failed: Restart IPsec and bring up the tunnel. Error: {e}")
             failed_steps.append("Restart IPsec and bring up the tunnel")
-
-        # Handle any failed steps
+        # Handle any failed steps (no Tkinter, just raise for UI to catch)
         if failed_steps:
-            failed_step = prompt_user_for_recovery(failed_steps)
-            logging.info(f"Retrying step: {failed_step}")
-
-            # Retry the failed step based on user input
-            if failed_step == "Enable IP forwarding":
-                enable_ip_forwarding(public_ip, username, key_file)
-            elif failed_step == "Install StrongSwan":
-                install_strongswan(public_ip, username, key_file)
-            elif failed_step == "Update IPsec Configuration":
-                update_ipsec_config(public_ip, username, key_file, ipsec_details)
-            elif failed_step == "Restart IPsec and bring up the tunnel":
-                restart_ipsec_and_tunnel(public_ip, username, key_file)
-
-        logging.info("IPsec configuration and tunnel setup completed successfully.")
-
+            logs.append(f"Failed steps: {failed_steps}. Please check logs and retry as needed.")
+            raise Exception("; ".join(logs))
+        logs.append("IPsec configuration and tunnel setup completed successfully.")
+        return "\n".join(logs)
     except Exception as e:
-        logging.error(f"An error occurred during IPsec configuration: {e}")
-        raise
+        logs.append(f"An error occurred during IPsec configuration: {e}")
+        raise Exception("\n".join(logs))
             
-def retry_command(ssh, command, retries=3, delay=10):
-    """
-    Execute a command with retries in case of failure.
-    :param ssh: SSH client
-    :param command: Command to execute
-    :param retries: Number of retry attempts
-    :param delay: Delay (in seconds) between retries
-    """
-    attempt = 0
-    while attempt < retries:
-        try:
-            logging.info(f"Attempt {attempt + 1} of {retries}: Executing command: {command}")
-            execute_command(ssh, command)
-            logging.info(f"Command succeeded: {command}")
-            return  # Exit the function if the command succeeds
-        except Exception as e:
-            logging.error(f"Attempt {attempt + 1} failed for command: {command}. Error: {e}")
-            attempt += 1
-            if attempt < retries:
-                logging.info(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
-                logging.error(f"All retry attempts failed for command: {command}")
-                raise
+
 
 def execute_command(ssh, command):
     """Execute a shell command on the remote instance."""
@@ -515,32 +511,6 @@ def backup_remote_file(ssh, remote_path):
         logging.info(f"Backup created: {backup_path}")
     except Exception as e:
         logging.warning(f"Could not create backup for {remote_path}: {e}")
-
-
-def install_with_retries(ssh, command, retries=3, delay=10):
-    """
-    Execute a command with retries in case of failure.
-    :param ssh: SSH client
-    :param command: Command to execute
-    :param retries: Number of retry attempts
-    :param delay: Delay (in seconds) between retries
-    """
-    attempt = 0
-    while attempt < retries:
-        try:
-            logging.info(f"Attempt {attempt + 1} of {retries}: Installing StrongSwan...")
-            execute_command(ssh, command)
-            logging.info("StrongSwan installed successfully.")
-            return  # Exit the function if the command succeeds
-        except Exception as e:
-            logging.error(f"Attempt {attempt + 1} failed: {e}")
-            attempt += 1
-            if attempt < retries:
-                logging.info(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
-                logging.error("All retry attempts failed. StrongSwan installation failed.")
-                raise
 
 
 #---------------------------------------------------------WINDOWS TASKS-----------------------------------------------------------------
@@ -612,7 +582,9 @@ def delete_specific_default_route(host, username, password, route_to_delete):
 
 def add_routes_and_maybe_change_gateway(host, username, password, new_gateway):
     """
-    Adds persistent routes and optionally changes the default gateway on a Windows instance.
+    Adds persistent routes and changes the default gateway on a Windows instance.
+    Gets the current default gateway and uses it as the next hop for persistent routes.
+    Always changes the default gateway (no user prompt).
     """
     if not new_gateway:
         logging.error("New default gateway is missing. Cannot proceed.")
@@ -624,91 +596,66 @@ def add_routes_and_maybe_change_gateway(host, username, password, new_gateway):
         # Create a WinRM session
         session = winrm.Session(f'http://{host}:5985/wsman', auth=(username, password), transport='basic', server_cert_validation='ignore')
 
-        # PowerShell script to add persistent routes
-        powershell_script_routes = """
-        # Define variables
+        # Step 1: Get the current default gateway
+        powershell_get_gateway = '''
+        $defaultGw = (Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -First 1).NextHop
+        Write-Host $defaultGw
+        '''
+        result_gw = session.run_ps(powershell_get_gateway)
+        default_gateway = result_gw.std_out.decode().strip().split('\n')[-1].strip()
+        logging.info(f"Current default gateway found: {default_gateway}")
+        if not default_gateway:
+            logging.error("Could not determine the current default gateway.")
+            return
+
+        # Step 2: Add persistent routes using the current default gateway as next hop
+        powershell_script_routes = f'''
         $route1Dest = "171.68.244.0"
         $route1Mask = "255.255.255.0"
         $route2Dest = "72.163.220.0"
         $route2Mask = "255.255.255.0"
-        $nextHop = "172.31.16.1"
+        $nextHop = "{default_gateway}"
         $metric = 1
-
-        # Add the first persistent route
         Write-Host "Adding persistent route: $route1Dest $route1Mask $nextHop metric $metric"
         route -p add $route1Dest mask $route1Mask $nextHop metric $metric
-
-        # Add the second persistent route
         Write-Host "Adding persistent route: $route2Dest $route2Mask $nextHop metric $metric"
         route -p add $route2Dest mask $route2Mask $nextHop metric $metric
-
-        # Verify that the routes were added
         Write-Host "Verifying routes..."
         route print | findstr $route1Dest
         route print | findstr $route2Dest
-        """
-
-        # Execute the PowerShell script to add routes
+        '''
         result_routes = session.run_ps(powershell_script_routes)
-
-        # Log the output for route addition
         logging.info(result_routes.std_out.decode())
         if result_routes.std_err:
             logging.warning(f"Error: {result_routes.std_err.decode()}")
-
         logging.info("Persistent routes added successfully.")
 
-        # Ask the user if they want to change the default gateway
-        change_gateway = input("Do you want to change the default gateway? (yes/no): ").strip().lower()
-
-        if change_gateway == "yes":
-            # PowerShell script to delete the old default route and add the new default gateway
-            powershell_script_gateway = f"""
-            # Define the new default gateway
-            $newGateway = "{new_gateway}"
-
-            # Get the current network adapter with an IPv4 address
-            $adapter = Get-NetAdapter | Where-Object {{ $_.Status -eq "Up" }}
-            $interfaceIndex = $adapter.ifIndex
-
-            # Get the current default gateway
-            $currentGateway = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {{ $_.DefaultGateway -ne $null }} | Select-Object -ExpandProperty DefaultGateway
-
-            Write-Host "Current Default Gateway: $currentGateway"
-
-            # Delete the old default route if it exists
-            if ($currentGateway) {{
-                Write-Host "Removing existing default gateway: $currentGateway..."
-                Remove-NetRoute -InterfaceIndex $interfaceIndex -NextHop $currentGateway -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-            }}
-
-            # Add the new default gateway
-            Write-Host "Adding new default gateway: $newGateway..."
-            New-NetRoute -InterfaceIndex $interfaceIndex -DestinationPrefix "0.0.0.0/0" -NextHop $newGateway
-
-            # Test connectivity with the new default gateway
-            Write-Host "Testing connectivity with the new default gateway..."
-            Test-Connection -ComputerName "8.8.8.8" -Count 4
-
-            # Log the result of the connectivity test
-            if ($?) {{
-                Write-Host "Connectivity test successful. Default gateway updated to: $newGateway"
-            }} else {{
-                Write-Host "Connectivity test failed. The new default gateway may not be reachable."
-            }}
-            """
-
-            # Execute the PowerShell script to change the default gateway
-            result_gateway = session.run_ps(powershell_script_gateway)
-
-            # Log the output for gateway change
-            logging.info(result_gateway.std_out.decode())
-            if result_gateway.std_err:
-                logging.warning(f"Error: {result_gateway.std_err.decode()}")
-
-            logging.info("Default gateway change process completed successfully.")
-        else:
-            logging.info("User chose not to change the default gateway. Exiting.")
+        # Step 3: Change the default gateway (always do it, no prompt)
+        powershell_script_gateway = f'''
+        $newGateway = "{new_gateway}"
+        $adapter = Get-NetAdapter | Where-Object {{ $_.Status -eq "Up" }}
+        $interfaceIndex = $adapter.ifIndex
+        $currentGateway = (Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -First 1).NextHop
+        Write-Host "Current Default Gateway: $currentGateway"
+        if ($currentGateway) {{
+            Write-Host "Removing existing default gateway: $currentGateway..."
+            Remove-NetRoute -InterfaceIndex $interfaceIndex -NextHop $currentGateway -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+        }}
+        Write-Host "Adding new default gateway: $newGateway..."
+        New-NetRoute -InterfaceIndex $interfaceIndex -DestinationPrefix "0.0.0.0/0" -NextHop $newGateway
+        Write-Host "Testing connectivity with the new default gateway..."
+        Test-Connection -ComputerName "8.8.8.8" -Count 4
+        if ($?) {{
+            Write-Host "Connectivity test successful. Default gateway updated to: $newGateway"
+        }} else {{
+            Write-Host "Connectivity test failed. The new default gateway may not be reachable."
+        }}
+        '''
+        result_gateway = session.run_ps(powershell_script_gateway)
+        logging.info(result_gateway.std_out.decode())
+        if result_gateway.std_err:
+            logging.warning(f"Error: {result_gateway.std_err.decode()}")
+        logging.info("Default gateway change process completed successfully.")
 
     except winrm.exceptions.InvalidCredentialsError:
         logging.error("Invalid credentials. Please verify the username and password.")
@@ -716,7 +663,6 @@ def add_routes_and_maybe_change_gateway(host, username, password, new_gateway):
         logging.error("WinRM transport error. Ensure WinRM is enabled and configured on the instance.")
     except Exception as e:
         logging.error(f"An error occurred while adding routes or changing the default gateway: {e}")
-
 def load_config(file_path, instance_type):
     """
     Load configuration from Config.json for the specified instance type (e.g., 'windows' or 'linux').
@@ -771,23 +717,129 @@ def execute_firewall_tasks(windows_instance_details, ubuntu_instance_details, in
     try:
         logging.info("Starting Windows tasks...")
         password = windows_instance_details["Password"]
-        add_routes_and_maybe_change_gateway(
+        # Step 1: Add routes and change gateway, get the old default gateway used
+        old_default_gateway = add_routes_and_maybe_change_gateway(
             windows_instance_details["PublicIpAddress"],
             windows_instance_details["Username"],
             password,
             ubuntu_instance_details["PrivateIpAddress"]
         )
-        delete_specific_default_route(
-            windows_instance_details["PublicIpAddress"],
-            windows_instance_details["Username"],
-            password,
-            "172.31.16.1"  # Example NextHop
-        )
+        # Step 2: Delete the old default gateway route (if found)
+        if old_default_gateway:
+            delete_specific_default_route(
+                windows_instance_details["PublicIpAddress"],
+                windows_instance_details["Username"],
+                password,
+                old_default_gateway
+            )
         logging.info("Windows tasks completed successfully.")
     except Exception as e:
         logging.error(f"An error occurred during Windows tasks: {e}")
         return
 
     logging.info("Firewall tasks completed successfully.")
+
+def change_default_gateway_winrm(win_instance, linux_instance):
+    """
+    Change the default gateway on a Windows instance via WinRM:
+    - Detect current default gateway
+    - Add new default gateway (Linux private IP)
+    - Test connectivity
+    - Remove old default gateway if ping is successful
+    Returns logs (list of strings)
+    """
+    import socket
+    logs = []
+    from . import winrm
+    session = winrm.Session(
+        f'http://{win_instance["PublicIpAddress"]}:5985/wsman',
+        auth=(win_instance["Username"], win_instance["Password"]),
+        transport='basic',
+        server_cert_validation='ignore',
+        read_timeout_sec=20,
+        operation_timeout_sec=10
+    )
+    # Detect current default gateway before change
+    detect_gateway_script = '''
+    $gw = (Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -First 1).NextHop
+    Write-Output $gw
+    '''
+    result_detect = session.run_ps(detect_gateway_script)
+    old_gw = result_detect.std_out.decode().strip()
+    logs.append(f"Detected old default gateway: {old_gw}")
+    powershell_script_gateway = f'''
+    $newGateway = "{linux_instance["PrivateIpAddress"]}"
+    $adapter = Get-NetAdapter | Where-Object {{ $_.Status -eq "Up" }}
+    $interfaceIndex = $adapter.ifIndex
+    $currentGateway = "{old_gw}"
+    Write-Host "Current Default Gateway: $currentGateway"
+    Write-Host "Adding new default gateway: $newGateway..."
+    New-NetRoute -InterfaceIndex $interfaceIndex -DestinationPrefix "0.0.0.0/0" -NextHop $newGateway
+    Write-Host "Testing connectivity with the new default gateway (before deleting old)..."
+    $pingResult = Test-Connection -ComputerName "8.8.8.8" -Count 4 -ErrorAction SilentlyContinue
+    if ($pingResult) {{
+        Write-Host "Ping successful. Proceeding to remove old default gateway."
+        if ($currentGateway) {{
+            Write-Host "Removing existing default gateway: $currentGateway..."
+            Remove-NetRoute -InterfaceIndex $interfaceIndex -NextHop $currentGateway -DestinationPrefix "0.0.0.0/0" -PolicyStore PersistentStore -ErrorAction SilentlyContinue
+        }}
+    }} else {{
+        Write-Host "Ping failed after adding new default gateway. Old default gateway will NOT be removed."
+    }}
+    '''
+    try:
+        result_gateway = session.run_ps(powershell_script_gateway)
+        logs.append(result_gateway.std_out.decode())
+        if result_gateway.std_err:
+            logs.append(f"Error: {result_gateway.std_err.decode()}")
+    except (winrm.exceptions.WinRMTransportError, socket.timeout) as e:
+        logs.append("WinRM connection lost after gateway change. This is expected if the new gateway breaks public connectivity.")
+    return logs, old_gw
+
+def detect_default_gateways_winrm(win_instance):
+    """
+    Detect all current default gateways (0.0.0.0/0) on a Windows instance via WinRM.
+    Returns a list of gateway IPs (strings).
+    """
+    from . import winrm
+    session = winrm.Session(
+        f'http://{win_instance["PublicIpAddress"]}:5985/wsman',
+        auth=(win_instance["Username"], win_instance["Password"]),
+        transport='basic',
+        server_cert_validation='ignore',
+        read_timeout_sec=20,
+        operation_timeout_sec=10
+    )
+    detect_gateway_script = '''
+    $gws = Get-NetRoute | Where-Object DestinationPrefix -eq "0.0.0.0/0" | Where-Object NextHop -ne "0.0.0.0" | Select-Object -ExpandProperty NextHop
+    $gws | ForEach-Object { Write-Output $_ }
+    '''
+    result_detect = session.run_ps(detect_gateway_script)
+    detected_gws = [gw.strip() for gw in result_detect.std_out.decode().splitlines() if gw.strip()]
+    return detected_gws
+
+def delete_default_gateway_winrm(win_instance, gateway_ip):
+    """
+    Delete a specific default gateway (0.0.0.0/0 via gateway_ip) on a Windows instance via WinRM.
+    Returns logs (list of strings)
+    """
+    from . import winrm
+    session = winrm.Session(
+        f'http://{win_instance["PublicIpAddress"]}:5985/wsman',
+        auth=(win_instance["Username"], win_instance["Password"]),
+        transport='basic',
+        server_cert_validation='ignore',
+        read_timeout_sec=20,
+        operation_timeout_sec=10
+    )
+    powershell_delete_route = f'''
+    Remove-NetRoute -DestinationPrefix "0.0.0.0/0" -NextHop {gateway_ip} -Confirm:$false -ErrorAction SilentlyContinue
+    '''
+    result_delete = session.run_ps(powershell_delete_route)
+    logs = []
+    logs.append(result_delete.std_out.decode())
+    if result_delete.std_err:
+        logs.append(f"Error: {result_delete.std_err.decode()}")
+    return logs
 
 
