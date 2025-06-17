@@ -25,7 +25,6 @@ def update_instance_in_json(instance_id, updated_details, instance_file):
     save_instance_file(instances)
 
 def execute_dns_workflow():
-    st.header("DNS Task Execution")
     config = load_config("Config.json")
     if not config:
         st.error("Config.json is empty. Please provide AWS parameters and update Config.json.")
@@ -35,7 +34,7 @@ def execute_dns_workflow():
         st.error("No Windows config found in Config.json.")
         return
 
-    st.subheader("Instance Management")
+    st.subheader("Step 1 : Creation/Reuse of Instance")
     reuse = st.radio("Do you want to reuse an existing instance for DNS?", ["Yes", "No"])
     instance_details = None
     if reuse == "Yes":
@@ -59,7 +58,7 @@ def execute_dns_workflow():
                     else:
                         st.error("Failed to fetch instance details from AWS.")
     else:
-        instance_name = st.text_input("Enter a name for the new instance:", value=dns_config.get("instance_name", ""))
+        instance_name = st.text_input("Enter a name for the new instance:", value=dns_config.get("instance_name", "dns-instance"))
         if st.button("Create New Instance"):
             config_with_name = dict(dns_config)
             config_with_name["instance_name"] = instance_name
@@ -71,25 +70,49 @@ def execute_dns_workflow():
                     "PublicIpAddress": public_ip,
                     "PrivateIpAddress": private_ip,
                     "InstanceType": dns_config["instance_type"],
+                    "InstanceName": instance_name
                 }
                 if "windows" in dns_config["type"]:
+                    import time
+                    st.info("Waiting 4 minutes for Windows instance initialization. Please do not proceed until this completes.")
+                    with st.empty():
+                        for i in range(4*60, 0, -1):
+                            mins, secs = divmod(i, 60)
+                            st.write(f"\u23f3 Windows instance initializing: {mins:02d}:{secs:02d} remaining...")
+                            time.sleep(1)
+                    st.success("Windows instance initialization wait complete. You may proceed.")
                     ec2 = boto3.client("ec2", region_name=dns_config["aws_region"])
-                    password = get_windows_password(ec2, instance_id, dns_config["key_file"], initial_wait=240)
+                    password = get_windows_password(ec2, instance_id, dns_config["key_file"], initial_wait=5)
                     details["Password"] = password
                     details["Username"] = "Administrator"
                 update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                 st.success("New instance created and saved.")
                 st.json(details)
                 instance_details = details
+                st.session_state["dns_instance_details"] = details
             else:
                 st.error("Failed to create new instance.")
+        instance_details = st.session_state.get("dns_instance_details", instance_details)
+
+    # Reset Instance Selection Option
+    if instance_details:
+        st.success(f"Using instance: {instance_details['InstanceId']}")
+        st.json(instance_details)
+        if st.button("Reset Instance Selection"):
+            if "dns_instance_details" in st.session_state:
+                del st.session_state["dns_instance_details"]
+            for k in [
+                "dns_precheck_ok", "dns_internet_ok", "dns_network_registered", "dns_task_ok"
+            ]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
 
     # 1. Instance Management (already present)
     # 2. Disable firewall and enable WinRM
     if instance_details and instance_details.get("Password"):
         st.subheader("Step 2: Manual - Disable Firewall & Enable WinRM on Windows")
         show_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
-        # Show credentials for RDP
         st.markdown("**RDP Credentials:**")
         st.code(f"Public IP: {instance_details['PublicIpAddress']}\nUsername: {instance_details.get('Username', 'Administrator')}\nPassword: {instance_details['Password']}", language="text")
         if st.button("I have disabled the firewall and enabled WinRM. Continue."):
@@ -101,16 +124,19 @@ def execute_dns_workflow():
         st.subheader("Step 3: Check Internet Connectivity (Windows)")
         if st.button("Check Connectivity"):
             try:
-                check_internet_connectivity(
+                success, output = check_internet_connectivity(
                     instance_details["PublicIpAddress"],
                     instance_details.get("Username", "Administrator"),
                     instance_details["Password"],
                 )
-                st.success("Internet connectivity check completed successfully.")
-                st.session_state["dns_internet_ok"] = True
+                st.text_area("Ping Output", output, height=120)
+                if success:
+                    st.success("Internet connectivity check completed successfully.")
+                    st.session_state["dns_internet_ok"] = True
+                else:
+                    st.error("Ping failed. Check network settings.")
             except Exception as e:
-                st.error(f"Error: {e}")
-                return
+                st.error(f"Error during connectivity check: {e}")
         if not st.session_state.get("dns_internet_ok"):
             return
 

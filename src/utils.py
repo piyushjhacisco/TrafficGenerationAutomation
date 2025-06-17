@@ -208,27 +208,37 @@ def terminate_instances(instance_file):
 def check_internet_connectivity(host, username, password):
     """
     Logs in to the Windows instance via WinRM and checks internet connectivity by pinging 8.8.8.8.
+    Returns (success, output):
+        success (bool): True if connectivity is confirmed, False otherwise.
+        output (str): The combined stdout and stderr from the ping command.
     """
     try:
         logging.info(f"Connecting to Windows instance at {host} via WinRM...")
-
-        # Create a WinRM session
         session = winrm.Session(f'http://{host}:5985/wsman', auth=(username, password), transport='basic', server_cert_validation='ignore')
-
-        # Ping 8.8.8.8 to check internet connectivity
         logging.info("Pinging 8.8.8.8 to check internet connectivity...")
         result = session.run_cmd('ping -n 4 8.8.8.8')
-        logging.info(result.std_out.decode())
-        if result.std_err:
-            logging.warning(f"Error: {result.std_err.decode()}")
-
-        logging.info("Internet connectivity check completed successfully.")
+        std_out = result.std_out.decode() if result.std_out else ''
+        std_err = result.std_err.decode() if result.std_err else ''
+        output = std_out + ("\n" + std_err if std_err else "")
+        logging.info(std_out)
+        if std_err:
+            logging.warning(f"Error: {std_err}")
+        # Check for success patterns in the output
+        success_patterns = [
+            "Reply from", "bytes from", "Received = 4", "0% packet loss", "Minimum ="
+        ]
+        success = any(pattern in output for pattern in success_patterns)
+        logging.info(f"Internet connectivity check completed. Success: {success}")
+        return success, output
     except winrm.exceptions.InvalidCredentialsError:
         logging.error("Invalid credentials. Please verify the username and password.")
+        return False, "Invalid credentials. Please verify the username and password."
     except winrm.exceptions.WinRMTransportError:
         logging.error("WinRM transport error. Ensure WinRM is enabled and configured on the instance.")
+        return False, "WinRM transport error. Ensure WinRM is enabled and configured on the instance."
     except Exception as e:
         logging.error(f"An error occurred while checking internet connectivity: {e}")
+        return False, f"An error occurred: {e}"
 
 def get_instance_details_from_aws(instance_id, aws_region, key_file=None):
     """

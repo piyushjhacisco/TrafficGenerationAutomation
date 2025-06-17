@@ -9,6 +9,7 @@ from src.workflows.web_workflow import execute_web_workflow
 from src.workflows.ztna_clientbased_workflow import execute_ztna_clientbased_workflow
 from src.workflows.ztna_clientless_workflow import execute_ztna_clientless_workflow
 from src.utils import load_config, handle_instance_reuse_or_creation, INSTANCE_JSON_FILE, load_instance_file, save_instance_file
+import boto3
 
 # Save updated values to Config.json
 def update_config(updated_values):
@@ -23,6 +24,32 @@ def update_config(updated_values):
     with open("Config.json", "w") as file:
         json.dump(config_data, file, indent=4)
     st.success("Config.json updated successfully!")
+
+def ensure_winrm_ports_open(security_group_id, region):
+    ec2 = boto3.client('ec2', region_name=region)
+    try:
+        ec2.authorize_security_group_ingress(
+            GroupId=security_group_id,
+            IpPermissions=[
+                {
+                    'IpProtocol': 'tcp',
+                    'FromPort': 5985,
+                    'ToPort': 5985,
+                    'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                },
+                {
+                    'IpProtocol': 'tcp',
+                    'FromPort': 5986,
+                    'ToPort': 5986,
+                    'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                }
+            ]
+        )
+    except ec2.exceptions.ClientError as e:
+        if "InvalidPermission.Duplicate" in str(e):
+            pass  # Rule already exists
+        else:
+            raise
 
 # Instance reuse or creation logic
 def handle_instance_reuse_or_creation(config, task_name, instance_file):
@@ -54,6 +81,9 @@ def handle_instance_reuse_or_creation(config, task_name, instance_file):
             "PrivateIpAddress": "192.168.1.1",    # Simulated value
             "InstanceType": "t3.medium",
         }
+        # Automatically open WinRM ports on the security group from config
+        if config and "security_group_id" in config and "aws_region" in config:
+            ensure_winrm_ports_open(config["security_group_id"], config["aws_region"])
         instances.append(new_instance)
         save_instance_file(instances)
         st.success("New instance created successfully!")
@@ -151,6 +181,89 @@ def input_aws_parameters():
         """, unsafe_allow_html=True)
         if st.button("Next", key="aws_next_btn"):
             if all([security_group_id, vpc_id, subnet_id, key_name, key_file_path]):
+                # --- AWS Validation and Security Group Rule Addition ---
+                try:
+                    ec2 = boto3.client("ec2")
+                    # Validate VPC
+                    vpcs = ec2.describe_vpcs(VpcIds=[vpc_id])
+                    if not vpcs["Vpcs"]:
+                        st.error(f"VPC ID {vpc_id} not found in AWS.")
+                        return
+                    # Validate Subnet
+                    subnets = ec2.describe_subnets(SubnetIds=[subnet_id])
+                    if not subnets["Subnets"]:
+                        st.error(f"Subnet ID {subnet_id} not found in AWS.")
+                        return
+                    # Validate Key Pair
+                    keys = ec2.describe_key_pairs(KeyNames=[key_name])
+                    # Validate Security Group
+                    sgs = ec2.describe_security_groups(GroupIds=[security_group_id])
+                    if not sgs["SecurityGroups"]:
+                        st.error(f"Security Group ID {security_group_id} not found in AWS.")
+                        return
+                    vpc_cidr = vpcs["Vpcs"][0]["CidrBlock"]
+                    # Add rule: Allow all traffic from VPC CIDR
+                    try:
+                        ec2.authorize_security_group_ingress(
+                            GroupId=security_group_id,
+                            IpPermissions=[{
+                                'IpProtocol': '-1',
+                                'IpRanges': [{'CidrIp': vpc_cidr, 'Description': 'Allow all from VPC'}],
+                            }]
+                        )
+                        st.success(f"Added rule: Allow all from {vpc_cidr} to Security Group {security_group_id}")
+                    except Exception as e:
+                        if 'InvalidPermission.Duplicate' in str(e):
+                            st.info(f"Rule for {vpc_cidr} already exists in Security Group {security_group_id}.")
+                        else:
+                            st.error(f"Failed to add VPC CIDR rule: {e}")
+                            return
+                    # Add rule: Allow all traffic from 171.68.0.0/16
+                    try:
+                        ec2.authorize_security_group_ingress(
+                            GroupId=security_group_id,
+                            IpPermissions=[{
+                                'IpProtocol': '-1',
+                                'IpRanges': [{'CidrIp': '171.68.0.0/16', 'Description': 'Allow all from 171.68.0.0/16'}],
+                            }]
+                        )
+                        st.success(f"Added rule: Allow all from 171.68.0.0/16 to Security Group {security_group_id}")
+                    except Exception as e:
+                        if 'InvalidPermission.Duplicate' in str(e):
+                            st.info(f"Rule for 171.68.0.0/16 already exists in Security Group {security_group_id}.")
+                        else:
+                            st.error(f"Failed to add 171.68.0.0/16 rule: {e}")
+                            return
+                    # Add rule: Allow WinRM (5985, 5986) from anywhere
+                    try:
+                        ec2.authorize_security_group_ingress(
+                            GroupId=security_group_id,
+                            IpPermissions=[
+                                {
+                                    'IpProtocol': 'tcp',
+                                    'FromPort': 5985,
+                                    'ToPort': 5985,
+                                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow WinRM 5985 from anywhere'}],
+                                },
+                                {
+                                    'IpProtocol': 'tcp',
+                                    'FromPort': 5986,
+                                    'ToPort': 5986,
+                                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow WinRM 5986 from anywhere'}],
+                                }
+                            ]
+                        )
+                        st.success(f"Added WinRM (5985, 5986) rules to Security Group {security_group_id}")
+                    except Exception as e:
+                        if 'InvalidPermission.Duplicate' in str(e):
+                            st.info(f"WinRM rules already exist in Security Group {security_group_id}.")
+                        else:
+                            st.error(f"Failed to add WinRM rules: {e}")
+                            return
+                except Exception as e:
+                    st.error(f"AWS validation or security group rule addition failed: {e}")
+                    return
+                # --- Only update config if all checks pass ---
                 st.session_state["aws_params"] = {
                     "security_group_id": security_group_id,
                     "vpc_id": vpc_id,

@@ -79,8 +79,17 @@ def execute_ztna_clientbased_workflow():
                         "InstanceName": instance_name
                     }
                     if "windows" in ztna_config["type"]:
+                        # --- Show 4-minute wait for Windows instance initialization BEFORE password retrieval ---
+                        import time
+                        st.info("Waiting 10 minutes for Windows instance initialization. Please do not proceed until this completes.")
+                        with st.empty():
+                            for i in range(10*60, 0, -1):
+                                mins, secs = divmod(i, 60)
+                                st.write(f"\u23f3 Windows instance initializing: {mins:02d}:{secs:02d} remaining...")
+                                time.sleep(1)
+                        st.success("Windows instance initialization wait complete. You may proceed.")
                         ec2 = boto3.client("ec2", region_name=ztna_config["aws_region"])
-                        password = get_windows_password(ec2, instance_id, ztna_config["key_file"], initial_wait=240)
+                        password = get_windows_password(ec2, instance_id, ztna_config["key_file"], initial_wait=5)
                         details["Password"] = password
                         details["Username"] = "Administrator"
                     update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
@@ -118,20 +127,23 @@ def execute_ztna_clientbased_workflow():
     elif instance_details:
         st.session_state["ztna_clientbased_precheck_ok"] = True  # Linux, skip
 
-    # Step 3: Check Internet Connectivity
-    st.subheader("Step 3: Check Internet Connectivity")
+    # --- Step 3: Check Internet Connectivity (Windows) ---
+    st.subheader("Step 3: Check Internet Connectivity (Windows)")
     if st.button("Check Connectivity"):
         try:
-            check_internet_connectivity(
+            success, output = check_internet_connectivity(
                 instance_details["PublicIpAddress"],
                 instance_details.get("Username", "Administrator"),
-                instance_details["Password"]
+                instance_details["Password"],
             )
-            st.success("Internet connectivity check completed successfully.")
-            st.session_state["ztna_clientbased_internet_ok"] = True
+            st.text_area("Ping Output", output, height=120)
+            if success:
+                st.success("Internet connectivity check completed successfully.")
+                st.session_state["ztna_clientbased_internet_ok"] = True
+            else:
+                st.error("Ping failed. Check network settings.")
         except Exception as e:
-            st.error(f"Error: {e}")
-            return
+            st.error(f"Error during connectivity check: {e}")
     if not st.session_state.get("ztna_clientbased_internet_ok"):
         return
 
@@ -166,28 +178,53 @@ def execute_ztna_clientbased_workflow():
     if not st.session_state.get("ztna_cb_ssh_ok"):
         return
 
-    # Step 4.2: Transfer Cisco Secure Client ZIP
-    btn_zip_disabled = bool(st.session_state.get("ztna_cb_zip_ok", False))
-    if st.button("Step 4.2: Transfer Cisco Secure Client ZIP", disabled=btn_zip_disabled):
-        from src.ZTNAClientbased.Tasks import transfer_file_with_paramiko, ZIP_FILE, REMOTE_ZIP_PATH
+    # Step 4.2: Generate S3 Pre-signed URL for Cisco Secure Client ZIP
+    btn_presign_disabled = bool(st.session_state.get("ztna_cb_presign_ok", False))
+    if st.button("Step 4.2: Generate S3 Pre-signed URL", disabled=btn_presign_disabled):
+        BUCKET_NAME = "ztna-cisco-secure-zip-file"
+        OBJECT_KEY = "cisco-secure-client-win-5.1.8.105-predeploy-k9 (1).zip"
         try:
-            ok = transfer_file_with_paramiko(
-                instance_details["Password"], ZIP_FILE, instance_details["Username"],
-                instance_details["PublicIpAddress"], REMOTE_ZIP_PATH
+            s3 = boto3.client("s3")
+            presigned_url = s3.generate_presigned_url(
+                ClientMethod='get_object',
+                Params={'Bucket': BUCKET_NAME, 'Key': OBJECT_KEY},
+                ExpiresIn=3600
             )
-            if ok:
-                st.success("ZIP file transferred successfully.")
-                st.session_state["ztna_cb_zip_ok"] = True
-            else:
-                st.error("Failed to transfer ZIP file.")
+            st.session_state["ztna_cb_presigned_url"] = presigned_url
+            st.success("Pre-signed S3 URL generated successfully.")
+            st.session_state["ztna_cb_presign_ok"] = True
+            st.code(presigned_url, language="text")
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error generating pre-signed URL: {e}")
+    if not st.session_state.get("ztna_cb_presign_ok"):
+        return
+
+    # Step 4.3: Download Cisco Secure Client ZIP from S3 to Windows Instance
+    btn_zip_disabled = bool(st.session_state.get("ztna_cb_zip_ok", False))
+    if st.button("Step 4.3: Download Cisco Secure Client ZIP from S3", disabled=btn_zip_disabled):
+        import winrm
+        REMOTE_ZIP_PATH = r"C:\\Users\\Administrator\\Downloads\\cisco-secure-client.zip"
+        presigned_url = st.session_state.get("ztna_cb_presigned_url")
+        if not presigned_url:
+            st.error("Pre-signed S3 URL not found. Please generate it in the previous step.")
+        else:
+            try:
+                session = winrm.Session(f"http://{instance_details['PublicIpAddress']}:5985/wsman", auth=(instance_details["Username"], instance_details["Password"]))
+                ps_command = f'Invoke-WebRequest -Uri "{presigned_url}" -OutFile "{REMOTE_ZIP_PATH}"'
+                result = session.run_ps(ps_command)
+                if result.status_code == 0:
+                    st.success("Cisco Secure Client ZIP downloaded from S3 successfully.")
+                    st.session_state["ztna_cb_zip_ok"] = True
+                else:
+                    st.error(f"Failed to download ZIP from S3: {result.std_err.decode().strip()}")
+            except Exception as e:
+                st.error(f"Error: {e}")
     if not st.session_state.get("ztna_cb_zip_ok"):
         return
 
-    # Step 4.3: Unzip Cisco Secure Client ZIP
+    # Step 4.4: Unzip Cisco Secure Client ZIP
     btn_unzip_disabled = bool(st.session_state.get("ztna_cb_unzip_ok", False))
-    if st.button("Step 4.3: Unzip Cisco Secure Client ZIP", disabled=btn_unzip_disabled):
+    if st.button("Step 4.4: Unzip Cisco Secure Client ZIP", disabled=btn_unzip_disabled):
         from src.ZTNAClientbased.Tasks import unzip_file_ssh, REMOTE_ZIP_PATH, REMOTE_UNZIP_DIR
         try:
             ok = unzip_file_ssh(
@@ -206,9 +243,9 @@ def execute_ztna_clientbased_workflow():
     if not st.session_state.get("ztna_cb_unzip_ok"):
         return
 
-    # Step 4.4: Install ZTNA modules
+    # Step 4.5: Install ZTNA modules
     btn_modules_disabled = bool(st.session_state.get("ztna_cb_modules_ok", False))
-    if st.button("Step 4.4: Install ZTNA modules (Core VPN, DART, ZTA)", disabled=btn_modules_disabled):
+    if st.button("Step 4.5: Install ZTNA modules (Core VPN, DART, ZTA)", disabled=btn_modules_disabled):
         from src.ZTNAClientbased.Tasks import create_winrm_session, find_installer, install_msi, REMOTE_UNZIP_DIR
         try:
             session = create_winrm_session(
@@ -240,16 +277,19 @@ def execute_ztna_clientbased_workflow():
     if not st.session_state.get("ztna_cb_modules_ok"):
         return
 
-    # Step 4.5: Replace hosts file
+    # Step 4.6: Replace hosts file
     btn_hosts_disabled = bool(st.session_state.get("ztna_cb_hosts_ok", False))
-    if st.button("Step 4.5: Replace hosts file", disabled=btn_hosts_disabled):
+    org_id = st.session_state.get("ztna_cb_org_id", "")
+    org_id = st.text_input("Enter Org ID for hosts file replacement:", value=org_id)
+    st.session_state["ztna_cb_org_id"] = org_id
+    if st.button("Step 4.6: Replace hosts file", disabled=btn_hosts_disabled):
         from src.ZTNAClientbased.Tasks import replace_hosts_file, HOSTS_FILE
         try:
             ok = replace_hosts_file(
                 instance_details["PublicIpAddress"],
                 instance_details["Username"],
                 instance_details["Password"],
-                ztna_config.get("org_id", ""),
+                org_id,
                 HOSTS_FILE,
                 "C:\\Windows\\System32\\drivers\\etc\\hosts"
             )
@@ -263,9 +303,9 @@ def execute_ztna_clientbased_workflow():
     if not st.session_state.get("ztna_cb_hosts_ok"):
         return
 
-    # Step 4.6: Copy additional files
+    # Step 4.7: Copy additional files
     btn_files_disabled = bool(st.session_state.get("ztna_cb_files_ok", False))
-    if st.button("Step 4.6: Copy additional files (cert, enrollment)", disabled=btn_files_disabled):
+    if st.button("Step 4.7: Copy additional files (cert, enrollment)", disabled=btn_files_disabled):
         from src.ZTNAClientbased.Tasks import copy_additional_files_paramiko, CERT_FILE, ENROLLMENT_FILE, REMOTE_CACERTS_DIR, REMOTE_ENROLLMENT_DIR
         try:
             ok = copy_additional_files_paramiko(

@@ -47,11 +47,21 @@ def execute_firewall_workflow():
         return {**kwargs, "disabled": st.session_state["fw_step_running"]}
 
     # --- Windows Instance Management (Reuse or Create) ---
-    st.header("Firewall Task Execution")
     st.subheader("Step 1: Windows Instance Management")
+    # Robust: Load from session or fallback to Instance.json
+    win_instance = st.session_state.get("fw_win_instance")
+    if not win_instance:
+        instances = load_instance_file()
+        win_instances = [i for i in instances if i.get("Username", "").lower() == "administrator"]
+        if win_instances:
+            win_instance = win_instances[-1]
+            st.session_state["fw_win_instance"] = win_instance
     reuse = st.radio("Do you want to reuse an existing instance for Firewall?", ["Yes", "No"])
-    win_instance = None
+    # Only set win_instance to None if user is actively making a new selection
+    if (reuse == "Yes" and st.session_state.get("fw_win_instance_selected") != "reuse") or (reuse == "No" and st.session_state.get("fw_win_instance_selected") != "create"):
+        win_instance = st.session_state.get("fw_win_instance")
     if reuse == "Yes":
+        st.session_state["fw_win_instance_selected"] = "reuse"
         instance_id = st.text_input("Enter the Instance ID to reuse:")
         if instance_id:
             instances = load_instance_file()
@@ -59,6 +69,7 @@ def execute_firewall_workflow():
             if instance:
                 st.success("Instance found in Instance.json.")
                 win_instance = instance
+                st.session_state["fw_win_instance"] = win_instance
             else:
                 st.info("Instance not found in Instance.json. Will fetch from AWS if you click below.")
                 if st.button("Fetch from AWS"):
@@ -67,10 +78,12 @@ def execute_firewall_workflow():
                         update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                         st.success("Fetched and saved instance details from AWS.")
                         win_instance = details
+                        st.session_state["fw_win_instance"] = win_instance
                     else:
                         st.error("Failed to fetch instance details from AWS.")
     else:
-        instance_name = st.text_input("Enter a name for the new Windows instance:", value=windows_config.get("instance_name", ""))
+        st.session_state["fw_win_instance_selected"] = "create"
+        instance_name = st.text_input("Enter a name for the new Windows instance:", value=windows_config.get("instance_name", "firewall-instance"))
         if st.button("Create New Instance"):
             config_with_name = dict(windows_config)
             config_with_name["instance_name"] = instance_name
@@ -82,15 +95,25 @@ def execute_firewall_workflow():
                     "PublicIpAddress": public_ip,
                     "PrivateIpAddress": private_ip,
                     "InstanceType": windows_config["instance_type"],
+                    "InstanceName": instance_name
                 }
                 if "windows" in windows_config["type"]:
+                    import time
+                    st.info("Waiting 4 minutes for Windows instance initialization. Please do not proceed until this completes.")
+                    with st.empty():
+                        for i in range(4*60, 0, -1):
+                            mins, secs = divmod(i, 60)
+                            st.write(f"\u23f3 Windows instance initializing: {mins:02d}:{secs:02d} remaining...")
+                            time.sleep(1)
+                    st.success("Windows instance initialization wait complete. You may proceed.")
                     ec2 = boto3.client("ec2", region_name=windows_config["aws_region"])
-                    password = get_windows_password(ec2, instance_id, windows_config["key_file"], initial_wait=240)
+                    password = get_windows_password(ec2, instance_id, windows_config["key_file"], initial_wait=5)
                     details["Password"] = password
                     details["Username"] = "Administrator"
                 update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                 st.success("New instance created and saved.")
                 win_instance = details
+                st.session_state["fw_win_instance"] = win_instance
             else:
                 st.error("Failed to create new instance.")
     # Only proceed if win_instance is valid
@@ -99,6 +122,16 @@ def execute_firewall_workflow():
         return
     st.session_state["fw_win_instance"] = win_instance
     st.json(win_instance)
+    # Reset Instance Selection Option
+    if st.button("Reset Instance Selection"):
+        if "fw_win_instance" in st.session_state:
+            del st.session_state["fw_win_instance"]
+        for k in [
+            "fw_precheck_ok", "fw_win_connectivity", "fw_sse_tunnel_ready", "fw_step_running"
+        ]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
 
     # --- Step 2: Disable firewall and enable WinRM ---
     if win_instance.get("Password"):
@@ -117,17 +150,22 @@ def execute_firewall_workflow():
     # --- Check internet connectivity on Windows ---
     st.subheader("Step 3: Check Internet Connectivity (Windows)")
     if st.button("Check Connectivity (Windows)", disabled=st.session_state["fw_step_running"]):
+        set_step_running(True)
         try:
-            check_internet_connectivity(
+            success, output = check_internet_connectivity(
                 win_instance["PublicIpAddress"],
                 win_instance["Username"],
                 win_instance["Password"]
             )
-            st.session_state["fw_win_connectivity"] = True
-            st.success("Windows instance has internet connectivity.")
+            st.text_area("Ping Output", output, height=120)
+            if success:
+                st.session_state["fw_win_connectivity"] = True
+                st.success("Windows instance has internet connectivity.")
+            else:
+                st.error("Ping failed. Check network settings.")
         except Exception as e:
-            st.error(f"Error: {e}")
-            return
+            st.error(f"Error during connectivity check: {e}")
+        set_step_running(False)
     if not st.session_state.get("fw_win_connectivity"):
         return
 
@@ -150,8 +188,16 @@ def execute_firewall_workflow():
 
     # --- Linux Instance Management (Reuse or Create) ---
     st.subheader("Step 5: Linux Instance Management")
+    # Always retrieve from session state
+    linux_instance = st.session_state.get("fw_linux_instance")
+    if not linux_instance:
+        # Try to load last Linux instance from Instance.json
+        instances = load_instance_file()
+        linux_instances = [i for i in instances if i.get("Username", "").lower() == "ubuntu"]
+        if linux_instances:
+            linux_instance = linux_instances[-1]  # Use the last one
+            st.session_state["fw_linux_instance"] = linux_instance
     reuse_linux = st.radio("Do you want to reuse an existing Linux instance?", ["Yes", "No"])
-    linux_instance = None
     if reuse_linux == "Yes":
         linux_instance_id = st.text_input("Enter Linux Instance ID to reuse:")
         if linux_instance_id:
@@ -160,6 +206,7 @@ def execute_firewall_workflow():
             if instance:
                 st.success("Instance found in Instance.json.")
                 linux_instance = instance
+                st.session_state["fw_linux_instance"] = linux_instance
             else:
                 st.info("Instance not found in Instance.json. Will fetch from AWS if you click below.")
                 if st.button("Fetch from AWS (Linux)"):
@@ -168,6 +215,7 @@ def execute_firewall_workflow():
                         update_instance_in_json(linux_instance_id, details, INSTANCE_JSON_FILE)
                         st.success("Fetched and saved Linux instance details from AWS.")
                         linux_instance = details
+                        st.session_state["fw_linux_instance"] = linux_instance
                     else:
                         st.error("Failed to fetch instance details from AWS.")
     else:
@@ -183,18 +231,20 @@ def execute_firewall_workflow():
                     "Username": linux_config.get("username", "ubuntu")
                 }
                 update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
+                st.session_state["fw_linux_instance"] = details  # Set session state immediately
                 st.success("Linux instance created and saved. Waiting 4 minutes for initialization...")
                 import time
                 with st.spinner("Waiting for Ubuntu instance to initialize (4 minutes)..."):
                     time.sleep(240)
                 linux_instance = details
+                st.session_state["fw_linux_instance"] = linux_instance
             else:
                 st.error("Failed to create Linux instance.")
     # Only proceed if linux_instance is valid
+    linux_instance = st.session_state.get("fw_linux_instance")
     if not linux_instance or not linux_instance.get("InstanceId") or not linux_instance.get("PublicIpAddress"):
         st.warning("Please select or create a valid Linux instance to proceed.")
         return
-    st.session_state["fw_linux_instance"] = linux_instance
     st.json(linux_instance)
 
     # --- Check internet connectivity on Linux (via SSH and ping) ---
@@ -220,7 +270,8 @@ def execute_firewall_workflow():
                         log_area.text_area("Ping Output", output, height=120)
                     if error:
                         log_area.text_area("Ping Error", error, height=120)
-                    if "0% packet loss" in output:
+                    # Pass if output contains 'bytes from', 'Reply from', '0% packet loss', or 'Minimum ='
+                    if ("bytes from" in output or "Reply from" in output or "0% packet loss" in output or "Minimum =" in output):
                         st.session_state["fw_linux_connectivity"] = True
                         st.success("Linux instance has internet connectivity.")
                     else:
