@@ -15,7 +15,7 @@ from src.utils import (
 )
 from src.Firewall.Tasks import change_default_gateway_winrm
 import boto3
-import winrm
+import time
 
 def update_instance_in_json(instance_id, updated_details, instance_file):
     instances = load_instance_file()
@@ -91,7 +91,6 @@ def execute_firewall_workflow():
                     "InstanceName": instance_name
                 }
                 if "windows" in windows_config["type"]:
-                    import time
                     st.info("Waiting 4 minutes for Windows instance initialization. Please do not proceed until this completes.")
                     with st.empty():
                         for i in range(4*60, 0, -1):
@@ -122,6 +121,9 @@ def execute_firewall_workflow():
                 st.session_state["fw_win_instance"] = win_instance
             else:
                 st.error("Failed to create new instance.")
+    # Always restore win_instance from session state if available
+    if not win_instance and st.session_state.get("fw_win_instance"):
+        win_instance = st.session_state["fw_win_instance"]
 
     # Only proceed if win_instance is valid
     if not win_instance or not win_instance.get("Password"):
@@ -129,9 +131,10 @@ def execute_firewall_workflow():
         return
     st.session_state["fw_win_instance"] = win_instance
 
-    # Only show instance details after a valid selection/creation
-    if st.session_state.get("fw_win_instance_selected") in ("reuse", "create") and st.session_state.get("fw_win_instance") and st.session_state["fw_win_instance"].get("Password"):
-        st.json(st.session_state["fw_win_instance"])
+    # Always show instance details if valid
+    if win_instance and win_instance.get("Password"):
+        st.success(f"Using instance: {win_instance['InstanceId']}")
+        st.json(win_instance)
 
     # Reset Instance Selection Option (Windows)
     if st.button("Reset Instance Selection (Windows)"):
@@ -223,13 +226,6 @@ def execute_firewall_workflow():
 
     # --- Linux Instance Management (Reuse or Create) ---
     st.subheader("Step 5: Linux Instance Management")
-    linux_instance = st.session_state.get("fw_linux_instance")
-    if not linux_instance:
-        instances = load_instance_file()
-        linux_instances = [i for i in instances if i.get("Username", "").lower() == "ubuntu"]
-        if linux_instances:
-            linux_instance = linux_instances[-1]
-            st.session_state["fw_linux_instance"] = linux_instance
     reuse_linux = st.radio("Do you want to reuse an existing Linux instance?", ["Yes", "No"], key="fw_linux_reuse")
     if reuse_linux == "Yes":
         linux_instance_id = st.text_input("Enter Linux Instance ID to reuse:", key="fw_linux_instance_id")
@@ -252,8 +248,11 @@ def execute_firewall_workflow():
                     else:
                         st.error("Failed to fetch instance details from AWS.")
     else:
+        linux_instance_name = st.text_input("Enter a name for the new Linux instance:", value=linux_config.get("instance_name", "linux-instance"), key="fw_linux_instance_name")
         if st.button("Create Linux Instance", key="fw_linux_create_instance"):
-            instance_id, public_ip, private_ip = create_instance(linux_config)
+            config_with_name = dict(linux_config)
+            config_with_name["instance_name"] = linux_instance_name
+            instance_id, public_ip, private_ip = create_instance(config_with_name)
             if instance_id:
                 disable_source_destination_check(instance_id)
                 details = {
@@ -261,25 +260,28 @@ def execute_firewall_workflow():
                     "PublicIpAddress": public_ip,
                     "PrivateIpAddress": private_ip,
                     "InstanceType": linux_config["instance_type"],
+                    "InstanceName": linux_instance_name,
                     "Username": linux_config.get("username", "ubuntu")
                 }
                 update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                 st.session_state["fw_linux_instance"] = details
                 st.success("Linux instance created and saved. Waiting 4 minutes for initialization...")
-                import time
                 with st.spinner("Waiting for Ubuntu instance to initialize (4 minutes)..."):
                     time.sleep(240)
                 linux_instance = details
                 st.session_state["fw_linux_instance"] = linux_instance
             else:
                 st.error("Failed to create Linux instance.")
-
     # Only proceed if linux_instance is valid
     linux_instance = st.session_state.get("fw_linux_instance")
     if not linux_instance or not linux_instance.get("InstanceId") or not linux_instance.get("PublicIpAddress"):
         st.warning("Please select or create a valid Linux instance to proceed.")
         return
-    st.json(linux_instance)
+
+    # Only show details after a valid selection/creation
+    if st.session_state.get("fw_linux_reuse") in ("Yes", "No") and linux_instance and linux_instance.get("InstanceId") and linux_instance.get("PublicIpAddress"):
+        st.success(f"Using Linux instance: {linux_instance['InstanceId']}")
+        st.json(linux_instance)
 
     # --- Check internet connectivity on Linux (via SSH and ping) ---
     if linux_instance:

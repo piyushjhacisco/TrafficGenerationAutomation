@@ -46,7 +46,6 @@ def execute_dns_workflow():
             instance = next((i for i in instances if i["InstanceId"] == instance_id), None)
             if instance:
                 st.success("Instance found in Instance.json.")
-                st.json(instance)
                 instance_details = instance
             else:
                 st.info("Instance not found in Instance.json. Will fetch from AWS if you click below.")
@@ -55,7 +54,6 @@ def execute_dns_workflow():
                     if details:
                         update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                         st.success("Fetched and saved instance details from AWS.")
-                        st.json(details)
                         instance_details = details
                     else:
                         st.error("Failed to fetch instance details from AWS.")
@@ -87,7 +85,6 @@ def execute_dns_workflow():
                                 status = "WinRM configuration in progress"
                             st.write(f"⏳ {status}: {mins:02d}:{secs:02d} remaining...")
                             time.sleep(1)
-                    st.success("Windows instance initialization and WinRM configuration should be complete.")
                     ec2 = boto3.client("ec2", region_name=dns_config["aws_region"])
                     password = get_windows_password(ec2, instance_id, dns_config["key_file"], initial_wait=5)
                     details["Password"] = password
@@ -107,7 +104,6 @@ def execute_dns_workflow():
                         details["WinRMConfigured"] = False
                 update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                 st.success("New instance created and saved.")
-                st.json(details)
                 instance_details = details
                 st.session_state["dns_instance_details"] = details
             else:
@@ -117,6 +113,7 @@ def execute_dns_workflow():
     # Reset Instance Selection Option
     if instance_details:
         st.success(f"Using instance: {instance_details['InstanceId']}")
+        st.json(instance_details) 
         if st.button("Reset Instance Selection"):
             for k in [
                 "dns_instance_details",
