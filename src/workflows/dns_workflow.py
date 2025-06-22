@@ -76,10 +76,10 @@ def execute_dns_workflow():
                 }
                 if "windows" in dns_config["type"]:
                     import time
-                    st.info("Waiting 6 minutes for Windows instance initialization and WinRM configuration. Please do not proceed until this completes.")
+                    st.info("Waiting 4 minutes for Windows instance initialization and WinRM configuration. Please do not proceed until this completes.")
                     st.info("🔧 The instance is being automatically configured with WinRM for remote access (Ansible-style automation). No manual steps required.")
                     with st.empty():
-                        for i in range(6*60, 0, -1):
+                        for i in range(4*60, 0, -1):
                             mins, secs = divmod(i, 60)
                             if i > 4*60:
                                 status = "Windows booting and generating password"
