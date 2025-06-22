@@ -391,12 +391,36 @@ def execute_firewall_workflow():
                 st.text_area("Change Default Gateway Logs", traceback.format_exc(), height=200)
     else:
         st.warning("Please select or create a Windows instance and set st.session_state['fw_win_instance'] before testing this step.")
-
-    # Final step: All done
+        
+    # --- Step 8: Change Default Gateway (Windows) ---
+    if 'fw_win_instance' in st.session_state and st.session_state['fw_win_instance']:
+        win_instance = st.session_state['fw_win_instance']
+        st.subheader("Step 9: Manual - Configure Gateway Settings on Windows")
+        gateway_steps = '''
+        --- ACTION REQUIRED ---
+        Please follow these steps to manually configure gateway and DNS settings on your Windows instance:
+        1. Go to **Network and Internet settings**
+        2. Select **Ethernet**
+        3. Double click on **Ethernet** → click on **Properties**
+        4. Select **Internet Protocol Version 4 (TCP/IPv4)** and click **Properties**
+        5. Select **Use the following IP address** and provide the required details (IP address, Subnet mask, Default gateway)
+        6. For **Preferred DNS server** and **Alternate DNS server**, enter: **8.8.8.8** and **1.1.1.1** (for testing)
+        7. Click **OK** to save the settings.
+        '''
+        st.code(gateway_steps, language="text")
+        st.info("After completing the above steps, click below.")
+        if st.button("I have configured the gateway and DNS settings on Windows."):
+            st.session_state["fw_gateway_settings_done"] = True
+        if not st.session_state.get("fw_gateway_settings_done"):
+            return       
     if all([
-        st.session_state.get("firewall_precheck_ok"),
-        st.session_state.get("firewall_internet_ok"),
-        st.session_state.get("firewall_task_ok")
+        st.session_state.get("fw_precheck_ok"),
+        st.session_state.get("fw_win_connectivity"),
+        st.session_state.get("fw_sse_tunnel_ready"),
+        st.session_state.get("fw_linux_instance"),
+        st.session_state.get("fw_linux_connectivity"),
+        st.session_state.get("fw_ipsec_ok"),
+        st.session_state.get("fw_gateway_settings_done")
     ]):
         st.success("Firewall workflow completed successfully!")
         st.balloons()
