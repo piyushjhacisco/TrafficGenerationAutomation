@@ -22,7 +22,6 @@ def update_instance_in_json(instance_id, updated_details, instance_file):
     save_instance_file(instances)
 
 def execute_ztna_clientless_workflow():
-    st.header("ZTNA Clientless Task Execution")
     config = load_config("Config.json")
     if not config:
         st.error("Config.json is empty. Please provide AWS parameters and update Config.json.")

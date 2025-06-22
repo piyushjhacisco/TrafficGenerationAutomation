@@ -97,19 +97,31 @@ def create_instance(config):
     """Create an EC2 instance and return its ID, public IP, and private IP."""
     ec2 = boto3.client("ec2", region_name=config["aws_region"])
     try:
+        # Prepare user_data for Windows instances to configure WinRM
+        user_data = ""
+        if "windows" in config.get("type", "").lower():
+            user_data = get_winrm_bootstrap_script()
+        
         # Launch the instance
-        instance = ec2.run_instances(
-            ImageId=config["ami_id"],
-            InstanceType=config["instance_type"],
-            KeyName=config["key_name"],
-            SecurityGroupIds=[config["security_group_id"]],
-            SubnetId=config["subnet_id"],
-            MinCount=1,
-            MaxCount=1,
-            TagSpecifications=[
+        launch_params = {
+            "ImageId": config["ami_id"],
+            "InstanceType": config["instance_type"],
+            "KeyName": config["key_name"],
+            "SecurityGroupIds": [config["security_group_id"]],
+            "SubnetId": config["subnet_id"],
+            "MinCount": 1,
+            "MaxCount": 1,
+            "TagSpecifications": [
                 {"ResourceType": "instance", "Tags": [{"Key": "Name", "Value": config["instance_name"]}]}
             ]
-        )
+        }
+        
+        # Add user_data for Windows instances
+        # Add user_data for Windows instances (as plain string, NOT base64-encoded)
+        if user_data:
+            launch_params["UserData"] = user_data
+        
+        instance = ec2.run_instances(**launch_params)
 
         # Extract the instance ID
         instance_id = instance["Instances"][0]["InstanceId"]
@@ -128,6 +140,11 @@ def create_instance(config):
         private_ip = instance_details.get("PrivateIpAddress", "N/A")
 
         logging.info(f"Instance is now running: {instance_id} with Public IP: {public_ip} and Private IP: {private_ip}")
+        
+        # For Windows instances, log that WinRM configuration is in progress
+        if user_data:
+            logging.info("Windows instance created with WinRM bootstrap script. WinRM will be configured automatically during instance initialization.")
+        
         return instance_id, public_ip, private_ip
     except Exception as e:
         logging.error(f"Failed to create instance: {e}")
@@ -345,3 +362,157 @@ Please RDP into the Windows instance with Public IP: {public_ip}
 """
     st.code(action_logs, language="text")
     st.info("After completing the above steps, click below.")
+
+def get_winrm_bootstrap_script():
+    """
+    Returns a PowerShell script for EC2 user_data that uses the official Ansible ConfigureRemotingForAnsible.ps1 script
+    to enable WinRM, set up basic auth, and allow unencrypted connections (best practice for Ansible/pywinrm automation).
+    """
+    return '''<powershell>
+# Download and run Microsoft's ConfigureRemotingForAnsible.ps1 script
+$url = "https://raw.githubusercontent.com/ansible/ansible/devel/examples/scripts/ConfigureRemotingForAnsible.ps1"
+$file = "$env:temp\\ConfigureRemotingForAnsible.ps1"
+
+# Download the script
+(New-Object -TypeName System.Net.WebClient).DownloadFile($url, $file)
+
+# Run the script to configure WinRM
+powershell.exe -ExecutionPolicy ByPass -File $file
+
+# Additional configuration for pywinrm (basic auth, allow unencrypted)
+winrm set winrm/config/service/auth '@{Basic="true"}'
+winrm set winrm/config/service '@{AllowUnencrypted="true"}'
+winrm set winrm/config/client/auth '@{Basic="true"}'
+winrm set winrm/config/client '@{AllowUnencrypted="true"}'
+
+# Create HTTP listener (if not present)
+winrm create winrm/config/listener?Address=*+Transport=HTTP
+
+# Open WinRM ports in Windows Firewall
+New-NetFirewallRule -DisplayName "WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow
+New-NetFirewallRule -DisplayName "WinRM HTTPS" -Direction Inbound -Protocol TCP -LocalPort 5986 -Action Allow
+
+# Restart WinRM service
+Restart-Service WinRM
+
+Write-Output "WinRM fully configured for Ansible/pywinrm automation."
+</powershell>'''
+
+def test_winrm_connection(public_ip, username, password, max_retries=3, retry_delay=10):
+    """
+    Test WinRM connection to a properly configured Windows instance.
+    Only checks HTTP (port 5985). If successful, disables the Windows firewall.
+    """
+    port = 5985
+    protocol = "http"
+    for attempt in range(max_retries):
+        try:
+            logging.info(f"Attempt {attempt + 1}/{max_retries}: Testing WinRM connection to {public_ip}:{port} ({protocol})")
+            endpoint = f'{protocol}://{public_ip}:{port}/wsman'
+            session = winrm.Session(endpoint, 
+                                    auth=(username, password), 
+                                    transport='basic',
+                                    server_cert_validation='ignore')
+            result = session.run_cmd('echo "WinRM connection successful"')
+            if result.status_code == 0:
+                output = result.std_out.decode('utf-8').strip()
+                logging.info(f"WinRM connection successful on {protocol.upper()} port {port}")
+                # Disable firewall if connection is successful
+                try:
+                    session.run_cmd('netsh advfirewall set allprofiles state off')
+                    logging.info("Windows firewall disabled via WinRM after successful connectivity test.")
+                except Exception as e:
+                    logging.warning(f"Failed to disable firewall: {e}")
+                return True, f"Connected successfully via {protocol.upper()} on port {port}: {output}"
+            else:
+                error_msg = result.std_err.decode('utf-8') if result.std_err else "Unknown error"
+                logging.warning(f"Command failed on {protocol}:{port}: {error_msg}")
+        except Exception as e:
+            logging.warning(f"Connection attempt {attempt + 1} failed on {protocol}:{port}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+    return False, "Failed to establish WinRM connection on HTTP port 5985"
+
+def diagnose_winrm_issues(public_ip, username, password, instance_id=None, aws_region=None):
+    """
+    Comprehensive diagnostic function to help troubleshoot WinRM connection issues.
+    """
+    diagnosis = []
+    
+    # Test 1: Basic network connectivity
+    diagnosis.append("=== WinRM Connection Diagnosis ===")
+    
+    try:
+        import socket
+        # Test if port 5985 is reachable
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        result = sock.connect_ex((public_ip, 5985))
+        if result == 0:
+            diagnosis.append("✅ Port 5985 (WinRM HTTP) is reachable")
+        else:
+            diagnosis.append("❌ Port 5985 (WinRM HTTP) is NOT reachable")
+        sock.close()
+        
+        # Test if port 5986 is reachable
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        result = sock.connect_ex((public_ip, 5986))
+        if result == 0:
+            diagnosis.append("✅ Port 5986 (WinRM HTTPS) is reachable")
+        else:
+            diagnosis.append("❌ Port 5986 (WinRM HTTPS) is NOT reachable")
+        sock.close()
+        
+    except Exception as e:
+        diagnosis.append(f"❌ Network connectivity test failed: {e}")
+    
+    # Test 2: Try WinRM connection with detailed error reporting
+    try:
+        session = winrm.Session(f'http://{public_ip}:5985/wsman', 
+                              auth=(username, password), 
+                              transport='basic',
+                              server_cert_validation='ignore')
+        result = session.run_cmd('echo "test"')
+        
+        if result.status_code == 0:
+            diagnosis.append("✅ WinRM HTTP connection successful")
+        else:
+            diagnosis.append(f"❌ WinRM HTTP connection failed with status: {result.status_code}")
+            if result.std_err:
+                diagnosis.append(f"   Error: {result.std_err.decode('utf-8')}")
+                
+    except winrm.exceptions.InvalidCredentialsError:
+        diagnosis.append("❌ WinRM authentication failed - invalid credentials")
+    except winrm.exceptions.WinRMTransportError as e:
+        diagnosis.append(f"❌ WinRM transport error: {e}")
+    except Exception as e:
+        diagnosis.append(f"❌ WinRM connection failed: {e}")
+    
+    return "\n".join(diagnosis)
+
+def wait_for_winrm_ready(public_ip, username, password, max_wait_minutes=10):
+    """
+    Intelligently wait for WinRM to become ready after Windows instance creation.
+    This combines password availability check with WinRM readiness check.
+    """
+    import time
+    
+    max_attempts = max_wait_minutes * 2  # Check every 30 seconds
+    
+    for attempt in range(max_attempts):
+        try:
+            # Test basic WinRM connection
+            success, message = test_winrm_connection(public_ip, username, password, max_retries=1, retry_delay=5)
+            
+            if success:
+                return True, f"WinRM ready after {attempt * 30} seconds: {message}"
+            
+            logging.info(f"WinRM not ready yet (attempt {attempt + 1}/{max_attempts}). Waiting 30 seconds...")
+            time.sleep(30)
+            
+        except Exception as e:
+            logging.warning(f"WinRM readiness check failed: {e}")
+            time.sleep(30)
+    
+    return False, f"WinRM not ready after {max_wait_minutes} minutes of waiting"

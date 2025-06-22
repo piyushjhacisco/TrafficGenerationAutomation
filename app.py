@@ -1,14 +1,12 @@
 import streamlit as st
 import json
-import os
-import time
 from pathlib import Path
 from src.workflows.dns_workflow import execute_dns_workflow
 from src.workflows.firewall_workflow import execute_firewall_workflow
 from src.workflows.web_workflow import execute_web_workflow
 from src.workflows.ztna_clientbased_workflow import execute_ztna_clientbased_workflow
 from src.workflows.ztna_clientless_workflow import execute_ztna_clientless_workflow
-from src.utils import load_config, handle_instance_reuse_or_creation, INSTANCE_JSON_FILE, load_instance_file, save_instance_file
+from src.utils import load_config, load_instance_file, save_instance_file
 import boto3
 
 # Save updated values to Config.json
@@ -151,22 +149,6 @@ def input_aws_parameters():
     )
 
     col1, col2, col3 = st.columns([1,8,1], gap="small")
-    with col1:
-        st.markdown("""
-            <style>
-            div[data-testid="column"] button[data-testid^='baseButton-aws_back_btn'] {
-                min-width: 120px !important;
-                max-width: 180px !important;
-                width: 100% !important;
-                padding: 0.5em 1.5em !important;
-                font-size: 1.1em !important;
-            }
-            </style>
-        """, unsafe_allow_html=True)
-        if st.button("Back", key="aws_back_btn"):
-            st.session_state["prerequisites_acknowledged"] = False
-            st.session_state["page"] = "prerequisites"
-            st.rerun() if hasattr(st, 'rerun') else st.experimental_rerun()
     with col3:
         st.markdown("""
             <style>
@@ -179,19 +161,29 @@ def input_aws_parameters():
             }
             </style>
         """, unsafe_allow_html=True)
-        if st.button("Next", key="aws_next_btn"):
+        # Enhancement: Disable Next button while processing
+        if "aws_next_processing" not in st.session_state:
+            st.session_state["aws_next_processing"] = False
+        next_btn_disabled = st.session_state["aws_next_processing"]
+        next_btn = st.button("Next", key="aws_next_btn", disabled=next_btn_disabled)
+        if next_btn and not next_btn_disabled:
+            st.session_state["aws_next_processing"] = True
+            st.rerun()
+        # Only process if Next was pressed and processing flag is set
+        if st.session_state.get("aws_next_processing", False):
             if all([security_group_id, vpc_id, subnet_id, key_name, key_file_path]):
-                # --- AWS Validation and Security Group Rule Addition ---
                 try:
                     ec2 = boto3.client("ec2")
                     # Validate VPC
                     vpcs = ec2.describe_vpcs(VpcIds=[vpc_id])
                     if not vpcs["Vpcs"]:
+                        st.session_state["aws_next_processing"] = False
                         st.error(f"VPC ID {vpc_id} not found in AWS.")
                         return
                     # Validate Subnet
                     subnets = ec2.describe_subnets(SubnetIds=[subnet_id])
                     if not subnets["Subnets"]:
+                        st.session_state["aws_next_processing"] = False
                         st.error(f"Subnet ID {subnet_id} not found in AWS.")
                         return
                     # Validate Key Pair
@@ -199,71 +191,35 @@ def input_aws_parameters():
                     # Validate Security Group
                     sgs = ec2.describe_security_groups(GroupIds=[security_group_id])
                     if not sgs["SecurityGroups"]:
+                        st.session_state["aws_next_processing"] = False
                         st.error(f"Security Group ID {security_group_id} not found in AWS.")
                         return
                     vpc_cidr = vpcs["Vpcs"][0]["CidrBlock"]
-                    # Add rule: Allow all traffic from VPC CIDR
-                    try:
-                        ec2.authorize_security_group_ingress(
-                            GroupId=security_group_id,
-                            IpPermissions=[{
-                                'IpProtocol': '-1',
-                                'IpRanges': [{'CidrIp': vpc_cidr, 'Description': 'Allow all from VPC'}],
-                            }]
-                        )
-                        st.success(f"Added rule: Allow all from {vpc_cidr} to Security Group {security_group_id}")
-                    except Exception as e:
-                        if 'InvalidPermission.Duplicate' in str(e):
-                            st.info(f"Rule for {vpc_cidr} already exists in Security Group {security_group_id}.")
-                        else:
-                            st.error(f"Failed to add VPC CIDR rule: {e}")
-                            return
-                    # Add rule: Allow all traffic from 171.68.0.0/16
-                    try:
-                        ec2.authorize_security_group_ingress(
-                            GroupId=security_group_id,
-                            IpPermissions=[{
-                                'IpProtocol': '-1',
-                                'IpRanges': [{'CidrIp': '171.68.0.0/16', 'Description': 'Allow all from 171.68.0.0/16'}],
-                            }]
-                        )
-                        st.success(f"Added rule: Allow all from 171.68.0.0/16 to Security Group {security_group_id}")
-                    except Exception as e:
-                        if 'InvalidPermission.Duplicate' in str(e):
-                            st.info(f"Rule for 171.68.0.0/16 already exists in Security Group {security_group_id}.")
-                        else:
-                            st.error(f"Failed to add 171.68.0.0/16 rule: {e}")
-                            return
-                    # Add rule: Allow WinRM (5985, 5986) from anywhere
-                    try:
-                        ec2.authorize_security_group_ingress(
-                            GroupId=security_group_id,
-                            IpPermissions=[
-                                {
-                                    'IpProtocol': 'tcp',
-                                    'FromPort': 5985,
-                                    'ToPort': 5985,
-                                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow WinRM 5985 from anywhere'}],
-                                },
-                                {
-                                    'IpProtocol': 'tcp',
-                                    'FromPort': 5986,
-                                    'ToPort': 5986,
-                                    'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow WinRM 5986 from anywhere'}],
-                                }
-                            ]
-                        )
-                        st.success(f"Added WinRM (5985, 5986) rules to Security Group {security_group_id}")
-                    except Exception as e:
-                        if 'InvalidPermission.Duplicate' in str(e):
-                            st.info(f"WinRM rules already exist in Security Group {security_group_id}.")
-                        else:
-                            st.error(f"Failed to add WinRM rules: {e}")
-                            return
+                    # Add all rules, but suppress per-rule logs
+                    rule_errors = []
+                    def add_rule(ip_permissions):
+                        try:
+                            ec2.authorize_security_group_ingress(GroupId=security_group_id, IpPermissions=ip_permissions)
+                        except Exception as e:
+                            if 'InvalidPermission.Duplicate' not in str(e):
+                                rule_errors.append(str(e))
+                    add_rule([{'IpProtocol': '-1','IpRanges': [{'CidrIp': vpc_cidr, 'Description': 'Allow all from VPC'}]}])
+                    add_rule([{'IpProtocol': '-1','IpRanges': [{'CidrIp': '171.68.0.0/16', 'Description': 'Allow all from 171.68.0.0/16'}]}])
+                    add_rule([{'IpProtocol': '-1','IpRanges': [{'CidrIp': '151.186.176.0/20', 'Description': 'Allow all from CCI Umbrella 2'}]}])
+                    add_rule([{'IpProtocol': '-1','IpRanges': [{'CidrIp': '151.186.192.0/20', 'Description': 'Allow all from CCI Umbrella 3'}]}])
+                    add_rule([
+                        {'IpProtocol': 'tcp','FromPort': 5985,'ToPort': 5985,'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow WinRM 5985 from anywhere'}]},
+                        {'IpProtocol': 'tcp','FromPort': 5986,'ToPort': 5986,'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow WinRM 5986 from anywhere'}]},
+                    ])
+                    if rule_errors:
+                        st.session_state["aws_next_processing"] = False
+                        st.error("One or more security group rules could not be added: " + "; ".join(rule_errors))
+                        return
                 except Exception as e:
+                    st.session_state["aws_next_processing"] = False
                     st.error(f"AWS validation or security group rule addition failed: {e}")
                     return
-                # --- Only update config if all checks pass ---
+                # Only update config if all checks pass
                 st.session_state["aws_params"] = {
                     "security_group_id": security_group_id,
                     "vpc_id": vpc_id,
@@ -272,9 +228,11 @@ def input_aws_parameters():
                     "key_file": key_file_path,
                 }
                 update_config(st.session_state["aws_params"])
+                st.session_state["aws_next_processing"] = False
                 st.session_state["page"] = "traffic_selection"
                 st.rerun() if hasattr(st, 'rerun') else st.experimental_rerun()
             else:
+                st.session_state["aws_next_processing"] = False
                 st.warning("Please fill out all fields to proceed.")
 
 # Step 2: Traffic Type Selection

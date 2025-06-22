@@ -9,6 +9,7 @@ from src.utils import (
     INSTANCE_JSON_FILE,
     check_internet_connectivity,
     get_instance_details_from_aws,
+    wait_for_winrm_ready,
     show_disable_firewall_and_enable_winrm
 )
 import boto3
@@ -92,6 +93,19 @@ def execute_ztna_clientbased_workflow():
                         password = get_windows_password(ec2, instance_id, ztna_config["key_file"], initial_wait=5)
                         details["Password"] = password
                         details["Username"] = "Administrator"
+                        st.info("🔍 Verifying WinRM configuration is complete...")
+                        winrm_ready, winrm_message = wait_for_winrm_ready(
+                            details["PublicIpAddress"],
+                            details["Username"],
+                            details["Password"],
+                            max_wait_minutes=5
+                        )
+                        if winrm_ready:
+                            st.success(f"✅ {winrm_message}")
+                            details["WinRMConfigured"] = True
+                        else:
+                            st.error(f"❌ {winrm_message}")
+                            details["WinRMConfigured"] = False
                     update_instance_in_json(instance_id, details, INSTANCE_JSON_FILE)
                     st.success("New instance created and saved.")
                     st.json(details)
@@ -114,18 +128,49 @@ def execute_ztna_clientbased_workflow():
                 del st.session_state[k]
         st.rerun()
 
-    # Step 2: Disable firewall and enable WinRM
+    # Step 2: WinRM info or connectivity check
     if instance_details and instance_details.get("Password"):
-        st.subheader("Step 2: Manual - Disable Firewall & Enable WinRM on Windows")
-        show_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
-        st.markdown("**RDP Credentials:**")
-        st.code(f"Public IP: {instance_details['PublicIpAddress']}\nUsername: {instance_details.get('Username', 'Administrator')}\nPassword: {instance_details['Password']}", language="text")
-        if st.button("I have disabled the firewall and enabled WinRM. Continue."):
-            st.session_state["ztna_clientbased_precheck_ok"] = True
-        if not st.session_state.get("ztna_clientbased_precheck_ok"):
-            return
-    elif instance_details:
-        st.session_state["ztna_clientbased_precheck_ok"] = True  # Linux, skip
+        reuse = st.session_state.get("ztna_clientbased_reuse", None)
+        if reuse is None:
+            # Determine reuse mode from previous selection if needed
+            reuse = "Yes" if "InstanceId" in instance_details and not instance_details.get("InstanceName", "").startswith("ztna-client-instance") else "No"
+        if reuse == "Yes":
+            st.subheader("Step 2: Manual - Disable Firewall & Enable WinRM on Windows")
+            show_disable_firewall_and_enable_winrm(instance_details["PublicIpAddress"])
+            st.markdown("**RDP Credentials:**")
+            st.code(
+                f"Public IP: {instance_details['PublicIpAddress']}\n"
+                f"Username: {instance_details.get('Username', 'Administrator')}\n"
+                f"Password: {instance_details['Password']}",
+                language="text"
+            )
+            if st.button("I have disabled the firewall and enabled WinRM. Continue."):
+                st.session_state["ztna_clientbased_precheck_ok"] = True
+            if not st.session_state.get("ztna_clientbased_precheck_ok"):
+                return
+
+        else:
+            st.subheader("Step 2: Automated WinRM Connectivity Check")
+            st.info("Testing WinRM connection. All configuration is automated via user data. No manual steps required.")
+            test_button = st.button("🔍 Test WinRM Connection")
+            if test_button:
+                from src.utils import test_winrm_connection
+                with st.spinner("Testing WinRM connection..."):
+                    success, message = test_winrm_connection(
+                        instance_details["PublicIpAddress"],
+                        instance_details.get("Username", "Administrator"),
+                        instance_details["Password"]
+                    )
+                    if success:
+                        st.success("✅ WinRM is configured and working!")
+                        st.text_area("Connection Test Result", message, height=100)
+                        st.session_state["ztna_clientbased_precheck_ok"] = True
+                    else:
+                        st.error("❌ WinRM connection failed. Please check instance configuration or try again.")
+                        st.text_area("Connection Test Result", message, height=100)
+                        st.session_state["ztna_clientbased_precheck_ok"] = False
+            if not st.session_state.get("ztna_clientbased_precheck_ok"):
+                return
 
     # --- Step 3: Check Internet Connectivity (Windows) ---
     st.subheader("Step 3: Check Internet Connectivity (Windows)")
